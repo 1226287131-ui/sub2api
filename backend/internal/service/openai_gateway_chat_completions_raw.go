@@ -285,6 +285,11 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
+	if s.openAIStreamPrimingEnabled(account) {
+		writeStreamHeaders()
+		// Prime the downstream NewAPI timestamp without marking semantic output as started.
+		s.sendOpenAIStreamPriming(c, account)
+	}
 	scanner := s.newUpstreamSSEScanner(resp.Body)
 
 	var usage OpenAIUsage

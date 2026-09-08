@@ -114,6 +114,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	if !ok {
 		return nil, errors.New("streaming not supported")
 	}
+	// Commit one non-semantic frame so a downstream NewAPI can record FRT while
+	// preserving pre-output failover accounting.
+	s.sendOpenAIStreamPriming(c, account)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize

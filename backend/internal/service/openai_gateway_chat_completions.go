@@ -662,6 +662,12 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
+	if s.openAIStreamPrimingEnabled(account) {
+		writeStreamHeaders()
+		// This frame is deliberately outside the converted response stream: it is
+		// visible to NewAPI for FRT, but is not treated as model output by this service.
+		s.sendOpenAIStreamPriming(c, account)
+	}
 
 	state := apicompat.NewResponsesEventToChatState()
 	state.Model = originalModel

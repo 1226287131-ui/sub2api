@@ -1853,6 +1853,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	if !ok {
 		return nil, errors.New("streaming not supported")
 	}
+	// Keep the first downstream NewAPI timestamp independent from upstream
+	// semantic output; keepalive accounting keeps failover eligible.
+	s.sendOpenAIStreamPriming(c, account)
 
 	usage := &OpenAIUsage{}
 	imageCounter := newOpenAIImageOutputCounter()
