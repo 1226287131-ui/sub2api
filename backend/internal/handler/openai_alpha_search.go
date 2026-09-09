@@ -163,9 +163,15 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		accountRelease, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, false, &streamStarted, reqLog)
+		// A dynamic wait may acquire a slot on another eligible account.
+		account = selection.Account
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号；否决次数达上限则按无可用账号终止。
-			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
+			vetoedAccountID := account.ID
+			if selection.Account != nil {
+				vetoedAccountID = selection.Account.ID
+			}
+			if !recordOpenAIProfitVeto(failedAccountIDs, vetoedAccountID, &profitVetoCount) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
 				return
 			}

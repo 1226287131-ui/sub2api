@@ -18,6 +18,11 @@ import (
 
 const gatewayStreamHeartbeatBytesKey = "gateway_stream_heartbeat_bytes"
 
+const (
+	accountWaitPollInterval         = 400 * time.Millisecond
+	maxDynamicAccountWaitCandidates = 8
+)
+
 func recordGatewayStreamHeartbeat(c *gin.Context, written int) {
 	if c == nil || written <= 0 {
 		return
@@ -449,6 +454,163 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 // AcquireAccountSlotWithWaitTimeout acquires an account slot with a custom timeout (keeps SSE ping).
 func (h *ConcurrencyHelper) AcquireAccountSlotWithWaitTimeout(c *gin.Context, accountID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
 	return h.waitForSlotWithPingTimeout(c, "account", accountID, maxConcurrency, timeout, isStream, streamStarted, true)
+}
+
+// AcquireAnyAccountSlotWithWaitTimeout probes a bounded list of eligible
+// accounts while waiting. It never sends an upstream request: every probe is
+// only an atomic concurrency-slot attempt. This prevents a request from being
+// pinned to one busy account when another account in the same pool becomes
+// available first.
+func (h *ConcurrencyHelper) AcquireAnyAccountSlotWithWaitTimeout(
+	c *gin.Context,
+	candidates []service.AccountWaitCandidate,
+	timeout time.Duration,
+	maxWaiting int,
+	isStream bool,
+	streamStarted *bool,
+) (int64, func(), error) {
+	if h == nil || h.concurrencyService == nil {
+		return 0, nil, fmt.Errorf("concurrency service is unavailable")
+	}
+	if c == nil || c.Request == nil {
+		return 0, nil, fmt.Errorf("request context is unavailable")
+	}
+
+	// De-duplicate candidates while preserving the scheduler's order. The
+	// account pointer is used only for the in-memory selection result; the slot
+	// itself is always acquired by ID through the concurrency service.
+	ordered := make([]service.AccountWaitCandidate, 0, len(candidates))
+	seen := make(map[int64]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Account == nil || candidate.Account.ID <= 0 {
+			continue
+		}
+		if _, exists := seen[candidate.Account.ID]; exists {
+			continue
+		}
+		seen[candidate.Account.ID] = struct{}{}
+		if candidate.MaxConcurrency == 0 {
+			candidate.MaxConcurrency = candidate.Account.Concurrency
+		}
+		ordered = append(ordered, candidate)
+		if len(ordered) >= maxDynamicAccountWaitCandidates {
+			break
+		}
+	}
+	if len(ordered) == 0 {
+		return 0, nil, fmt.Errorf("no account wait candidates")
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
+	tryAcquire := func(candidate service.AccountWaitCandidate) (func(), bool, error) {
+		result, err := h.concurrencyService.AcquireAccountSlot(ctx, candidate.Account.ID, candidate.MaxConcurrency)
+		if err != nil {
+			return nil, false, err
+		}
+		if result == nil || !result.Acquired {
+			return nil, false, nil
+		}
+		return result.ReleaseFunc, true, nil
+	}
+
+	// Preserve the existing fast path: all candidates get one immediate probe
+	// before a request enters a wait queue.
+	for _, candidate := range ordered {
+		release, acquired, err := tryAcquire(candidate)
+		if err != nil {
+			return 0, nil, err
+		}
+		if acquired {
+			return candidate.Account.ID, release, nil
+		}
+	}
+
+	// Keep the existing per-account queue guard. We reserve one queue position
+	// on the first candidate and release it when another candidate wins, so
+	// alternate probes do not inflate every account's waiting count.
+	var primary *service.AccountWaitCandidate
+	waitCounted := false
+	for _, candidate := range ordered {
+		canWait, waitErr := h.concurrencyService.IncrementAccountWaitCount(ctx, candidate.Account.ID, maxWaiting)
+		if waitErr != nil {
+			// Match the legacy fail-open behavior for a transient wait-counter
+			// read/write error: continue waiting without claiming a queue slot.
+			candidateCopy := candidate
+			primary = &candidateCopy
+			break
+		}
+		if canWait {
+			candidateCopy := candidate
+			primary = &candidateCopy
+			waitCounted = true
+			break
+		}
+	}
+	if primary == nil {
+		return 0, nil, &WaitQueueFullError{SlotType: "account"}
+	}
+	defer func() {
+		if waitCounted {
+			h.concurrencyService.DecrementAccountWaitCount(context.Background(), primary.Account.ID)
+		}
+	}()
+
+	needPing := isStream && h.pingFormat != ""
+	var flusher http.Flusher
+	if needPing {
+		var ok bool
+		flusher, ok = c.Writer.(http.Flusher)
+		if !ok {
+			return 0, nil, fmt.Errorf("streaming not supported")
+		}
+	}
+	var pingCh <-chan time.Time
+	if needPing {
+		pingTicker := time.NewTicker(h.pingInterval)
+		defer pingTicker.Stop()
+		pingCh = pingTicker.C
+	}
+	pollTicker := time.NewTicker(accountWaitPollInterval)
+	defer pollTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if parentErr := c.Request.Context().Err(); parentErr != nil {
+				return 0, nil, parentErr
+			}
+			return 0, nil, &ConcurrencyError{SlotType: "account", IsTimeout: true}
+
+		case <-pingCh:
+			if streamStarted != nil && !*streamStarted {
+				c.Header("Content-Type", "text/event-stream")
+				c.Header("Cache-Control", "no-cache")
+				c.Header("Connection", "keep-alive")
+				c.Header("X-Accel-Buffering", "no")
+				*streamStarted = true
+			}
+			written, err := fmt.Fprint(c.Writer, string(h.pingFormat))
+			if err != nil {
+				return 0, nil, err
+			}
+			recordGatewayStreamHeartbeat(c, written)
+			flusher.Flush()
+
+		case <-pollTicker.C:
+			for _, candidate := range ordered {
+				release, acquired, err := tryAcquire(candidate)
+				if err != nil {
+					return 0, nil, err
+				}
+				if acquired {
+					waitCounted = false
+					h.concurrencyService.DecrementAccountWaitCount(context.Background(), primary.Account.ID)
+					return candidate.Account.ID, release, nil
+				}
+			}
+		}
+	}
 }
 
 // nextBackoff 计算下一次退避时间

@@ -279,6 +279,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		)
 
 		account := selection.Account
+		initialAccountID := account.ID
 		if endpoint.IsGenerationRequest() {
 			eligible, eligibilityReason, eligibilityErr := h.ensureGrokMediaAccountEligibility(requestCtx, account)
 			if !eligible {
@@ -302,10 +303,16 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, false, &streamStarted, reqLog)
+		// A dynamic wait may acquire a slot on another eligible account.
+		account = selection.Account
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 媒体路径已显式豁免利润门（suppress 标记），此分支仅防御性兜底，
 			// 同样受否决上限约束。
-			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
+			vetoedAccountID := account.ID
+			if selection.Account != nil {
+				vetoedAccountID = selection.Account.ID
+			}
+			if !recordOpenAIProfitVeto(failedAccountIDs, vetoedAccountID, &profitVetoCount) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
 				return
 			}
@@ -313,6 +320,39 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		}
 		if slotResult != openAISlotAcquireOK {
 			return
+		}
+		if boundLookupAccountID > 0 && account.ID != boundLookupAccountID {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+			}
+			reqLog.Warn("grok_media.video_lookup_dynamic_account_mismatch",
+				zap.Int64("bound_account_id", boundLookupAccountID),
+				zap.Int64("selected_account_id", account.ID),
+			)
+			h.errorResponse(c, http.StatusNotFound, "not_found_error", "Video request not found")
+			return
+		}
+		if endpoint.IsGenerationRequest() && account.ID != initialAccountID {
+			eligible, eligibilityReason, eligibilityErr := h.ensureGrokMediaAccountEligibility(requestCtx, account)
+			if !eligible {
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				mediaEligibilityRejected = true
+				failedAccountIDs[account.ID] = struct{}{}
+				reqLog.Warn("grok_media.dynamic_account_eligibility_rejected",
+					zap.Int64("account_id", account.ID),
+					zap.String("reason", eligibilityReason),
+					zap.Bool("probe_failed", eligibilityErr != nil),
+				)
+				if switchCount >= maxAccountSwitches {
+					markOpsRoutingCapacityLimited(c)
+					h.errorResponse(c, http.StatusServiceUnavailable, "grok_media_no_eligible_account", "No eligible Grok media accounts")
+					return
+				}
+				switchCount++
+				continue
+			}
 		}
 
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())

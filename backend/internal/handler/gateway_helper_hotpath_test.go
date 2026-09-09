@@ -28,6 +28,8 @@ type helperConcurrencyCacheStub struct {
 	waitAllowed         bool
 	waitIncrementCalls  int
 	waitDecrementCalls  int
+	waitIncrementIDs    []int64
+	waitDecrementIDs    []int64
 	waitMaxWait         int
 	waitIncrementHook   func()
 	apiKeyTrackCalls    int
@@ -67,10 +69,19 @@ func (s *helperConcurrencyCacheStub) GetAccountConcurrencyBatch(ctx context.Cont
 }
 
 func (s *helperConcurrencyCacheStub) IncrementAccountWaitCount(ctx context.Context, accountID int64, maxWait int) (bool, error) {
+	s.mu.Lock()
+	s.waitIncrementCalls++
+	s.waitIncrementIDs = append(s.waitIncrementIDs, accountID)
+	s.waitMaxWait = maxWait
+	s.mu.Unlock()
 	return true, nil
 }
 
 func (s *helperConcurrencyCacheStub) DecrementAccountWaitCount(ctx context.Context, accountID int64) error {
+	s.mu.Lock()
+	s.waitDecrementCalls++
+	s.waitDecrementIDs = append(s.waitDecrementIDs, accountID)
+	s.mu.Unlock()
 	return nil
 }
 
@@ -490,6 +501,39 @@ func TestAcquireAccountSlotWithWaitTimeout_ImmediateAttemptBeforeBackoff(t *test
 	require.ErrorAs(t, err, &cErr)
 	require.True(t, cErr.IsTimeout)
 	require.GreaterOrEqual(t, cache.accountAcquireCalls, 1)
+}
+
+func TestAcquireAnyAccountSlotWithWaitTimeoutUsesAlternateAccount(t *testing.T) {
+	cache := &helperConcurrencyCacheStub{
+		// Immediate probes: account 401/402 both busy. On the first poll,
+		// account 401 remains busy and account 402 becomes available.
+		accountSeq:  []bool{false, false, false, true},
+		waitAllowed: true,
+	}
+	concurrency := service.NewConcurrencyService(cache)
+	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
+	c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+	streamStarted := false
+
+	selectedID, release, err := helper.AcquireAnyAccountSlotWithWaitTimeout(
+		c,
+		[]service.AccountWaitCandidate{
+			{Account: &service.Account{ID: 401, Concurrency: 1}, MaxConcurrency: 1},
+			{Account: &service.Account{ID: 402, Concurrency: 1}, MaxConcurrency: 1},
+		},
+		500*time.Millisecond,
+		2,
+		false,
+		&streamStarted,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(402), selectedID)
+	require.NotNil(t, release)
+	release()
+	require.Equal(t, 1, cache.waitIncrementCalls, "a pool wait should reserve one queue position")
+	require.Equal(t, 1, cache.waitDecrementCalls, "the reserved queue position must be released exactly once")
+	require.Equal(t, []int64{401}, cache.waitIncrementIDs)
+	require.Equal(t, []int64{401}, cache.waitDecrementIDs)
 }
 
 type helperConcurrencyCacheStubWithError struct {

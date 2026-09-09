@@ -14,6 +14,91 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestBuildOpenAIWaitOrderPrefersShortestKnownQueueWithinPriority(t *testing.T) {
+	longQueue := &Account{ID: 9001, Priority: 0, LastUsedAt: ptrTime(time.Unix(100, 0))}
+	shortQueue := &Account{ID: 9002, Priority: 0, LastUsedAt: ptrTime(time.Unix(200, 0))}
+	lowerPriority := &Account{ID: 9003, Priority: 1, LastUsedAt: ptrTime(time.Unix(1, 0))}
+	plan := openAIAccountLoadPlan{
+		candidates: []openAIAccountCandidateScore{
+			{account: longQueue, loadKnown: true, loadInfo: &AccountLoadInfo{CurrentConcurrency: 5, WaitingCount: 8, LoadRate: 90}},
+			{account: shortQueue, loadKnown: true, loadInfo: &AccountLoadInfo{CurrentConcurrency: 5, WaitingCount: 1, LoadRate: 20}},
+			{account: lowerPriority, loadKnown: true, loadInfo: &AccountLoadInfo{CurrentConcurrency: 0, WaitingCount: 0, LoadRate: 0}},
+		},
+	}
+
+	ordered := buildOpenAIWaitOrder(plan, OpenAIAccountScheduleRequest{SessionHash: "short-queue"})
+	require.Len(t, ordered, 3)
+	require.Equal(t, int64(9002), ordered[0].account.ID, "same-priority account with shorter queue should be waited on first")
+	require.Equal(t, int64(9001), ordered[1].account.ID)
+	require.Equal(t, int64(9003), ordered[2].account.ID, "priority must remain authoritative")
+}
+
+func TestBuildOpenAIWaitOrderDoesNotTreatUnknownLoadAsIdle(t *testing.T) {
+	knownBusy := &Account{ID: 9011, Priority: 0}
+	unknown := &Account{ID: 9012, Priority: 0}
+	plan := openAIAccountLoadPlan{
+		candidates: []openAIAccountCandidateScore{
+			{account: unknown, loadKnown: false, loadInfo: &AccountLoadInfo{}},
+			{account: knownBusy, loadKnown: true, loadInfo: &AccountLoadInfo{CurrentConcurrency: 3, WaitingCount: 3, LoadRate: 80}},
+		},
+	}
+
+	ordered := buildOpenAIWaitOrder(plan, OpenAIAccountScheduleRequest{SessionHash: "unknown-load"})
+	require.Len(t, ordered, 2)
+	require.Equal(t, int64(9011), ordered[0].account.ID)
+	require.Equal(t, int64(9012), ordered[1].account.ID)
+}
+
+func TestBuildOpenAIWaitOrderDistributesEqualLoadByRequestSeed(t *testing.T) {
+	plan := openAIAccountLoadPlan{
+		candidates: []openAIAccountCandidateScore{
+			{account: &Account{ID: 9021, Priority: 0}, loadKnown: true, loadInfo: &AccountLoadInfo{CurrentConcurrency: 2, WaitingCount: 1, LoadRate: 50}},
+			{account: &Account{ID: 9022, Priority: 0}, loadKnown: true, loadInfo: &AccountLoadInfo{CurrentConcurrency: 2, WaitingCount: 1, LoadRate: 50}},
+			{account: &Account{ID: 9023, Priority: 0}, loadKnown: true, loadInfo: &AccountLoadInfo{CurrentConcurrency: 2, WaitingCount: 1, LoadRate: 50}},
+		},
+	}
+
+	first := buildOpenAIWaitOrder(plan, OpenAIAccountScheduleRequest{SessionHash: "request-a"})
+	repeat := buildOpenAIWaitOrder(plan, OpenAIAccountScheduleRequest{SessionHash: "request-a"})
+	other := buildOpenAIWaitOrder(plan, OpenAIAccountScheduleRequest{SessionHash: "request-b"})
+	require.Len(t, first, 3)
+	require.Equal(t, accountIDsFromWaitOrder(first), accountIDsFromWaitOrder(repeat), "the same request seed must keep a stable order")
+	require.NotEqual(t, accountIDsFromWaitOrder(first), accountIDsFromWaitOrder(other), "equal-load requests should be eligible for different first accounts")
+}
+
+func TestOpenAISelectionWaitPlanIncludesAlternateAccounts(t *testing.T) {
+	groupID := int64(9030)
+	accounts := []Account{
+		{ID: 9031, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 0, GroupIDs: []int64{groupID}},
+		{ID: 9032, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 0, GroupIDs: []int64{groupID}},
+	}
+	svc := &OpenAIGatewayService{
+		accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cfg:         &config.Config{RunMode: config.RunModeStandard},
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{
+			acquireResults: map[int64]bool{9031: false, 9032: false},
+		}),
+	}
+
+	selection, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, "", "gpt-5.1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.WaitPlan)
+	require.Len(t, selection.WaitPlan.Candidates, 2)
+	require.Equal(t, int64(9031), selection.WaitPlan.Candidates[0].Account.ID)
+	require.Equal(t, int64(9032), selection.WaitPlan.Candidates[1].Account.ID)
+}
+
+func accountIDsFromWaitOrder(order []openAIAccountCandidateScore) []int64 {
+	ids := make([]int64, 0, len(order))
+	for _, candidate := range order {
+		if candidate.account != nil {
+			ids = append(ids, candidate.account.ID)
+		}
+	}
+	return ids
+}
+
 type openAISnapshotCacheStub struct {
 	SchedulerCache
 	snapshotAccounts []*Account

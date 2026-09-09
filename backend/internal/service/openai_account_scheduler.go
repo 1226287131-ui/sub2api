@@ -148,6 +148,7 @@ type openAIAccountLoadPlan struct {
 type openAIAccountLoadSelectionAttempt struct {
 	result              *AccountSelectionResult
 	selectionOrder      []openAIAccountCandidateScore
+	waitOrder           []openAIAccountCandidateScore
 	candidateCount      int
 	topK                int
 	loadSkew            float64
@@ -1559,6 +1560,7 @@ func (s *defaultOpenAIAccountScheduler) trySelectByLoadBalancePool(
 	}
 	attempt := openAIAccountLoadSelectionAttempt{
 		selectionOrder: plan.selectionOrder,
+		waitOrder:      buildOpenAIWaitOrder(plan, req),
 		candidateCount: plan.candidateCount,
 		topK:           plan.topK,
 		loadSkew:       plan.loadSkew,
@@ -1605,6 +1607,7 @@ func (s *defaultOpenAIAccountScheduler) trySelectByLoadBalancePool(
 				if freshResult != nil {
 					attempt.result = freshResult
 					attempt.selectionOrder = freshPlan.selectionOrder
+					attempt.waitOrder = buildOpenAIWaitOrder(freshPlan, req)
 					attempt.candidateCount = freshPlan.candidateCount
 					attempt.topK = freshPlan.topK
 					attempt.loadSkew = freshPlan.loadSkew
@@ -1612,6 +1615,7 @@ func (s *defaultOpenAIAccountScheduler) trySelectByLoadBalancePool(
 				}
 				attempt.compactBlocked = attempt.compactBlocked || freshCompactBlocked
 				attempt.selectionOrder = freshPlan.selectionOrder
+				attempt.waitOrder = buildOpenAIWaitOrder(freshPlan, req)
 				attempt.candidateCount = freshPlan.candidateCount
 				attempt.topK = freshPlan.topK
 				attempt.loadSkew = freshPlan.loadSkew
@@ -1620,6 +1624,85 @@ func (s *defaultOpenAIAccountScheduler) trySelectByLoadBalancePool(
 	}
 
 	return attempt
+}
+
+// buildOpenAIWaitOrder builds the order used when every immediate slot probe
+// is busy and the request must wait for an account. The weighted selection
+// order is useful for spreading traffic, but it can pin a waiting request to
+// an account with a much longer queue. Waiting is a different decision: keep
+// account priority semantics, then prefer the freshest and shortest load
+// snapshot so the request is most likely to receive a slot soonest.
+func buildOpenAIWaitOrder(plan openAIAccountLoadPlan, req OpenAIAccountScheduleRequest) []openAIAccountCandidateScore {
+	pool := make([]openAIAccountCandidateScore, 0, len(plan.candidates)+len(plan.staleSnapshotCompactRetry))
+	pool = append(pool, plan.candidates...)
+	pool = append(pool, plan.staleSnapshotCompactRetry...)
+	if len(pool) == 0 {
+		pool = append(pool, plan.allCandidates...)
+	}
+	if len(pool) <= 1 {
+		return pool
+	}
+	ordered := append([]openAIAccountCandidateScore(nil), pool...)
+	waitSeed := deriveOpenAISelectionSeed(req)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.account == nil || b.account == nil {
+			return a.account != nil
+		}
+		if a.account.Priority != b.account.Priority {
+			return a.account.Priority < b.account.Priority
+		}
+		// Unknown snapshots must not look artificially idle. A known snapshot
+		// is the better basis for a wait plan than a synthetic zero-value load.
+		aLoadKnown := a.loadKnown && a.loadInfo != nil
+		bLoadKnown := b.loadKnown && b.loadInfo != nil
+		if aLoadKnown != bLoadKnown {
+			return aLoadKnown
+		}
+		if aLoadKnown && bLoadKnown {
+			if a.loadInfo.CurrentConcurrency != b.loadInfo.CurrentConcurrency {
+				return a.loadInfo.CurrentConcurrency < b.loadInfo.CurrentConcurrency
+			}
+			if a.loadInfo.WaitingCount != b.loadInfo.WaitingCount {
+				return a.loadInfo.WaitingCount < b.loadInfo.WaitingCount
+			}
+			if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
+				return a.loadInfo.LoadRate < b.loadInfo.LoadRate
+			}
+		}
+		// When the observable load state is identical, use a request-scoped
+		// tie-breaker. This keeps each request's order stable while avoiding a
+		// thundering herd of concurrent requests choosing the same account from
+		// one shared snapshot.
+		aTie := openAIWaitTieKey(waitSeed, a.account.ID)
+		bTie := openAIWaitTieKey(waitSeed, b.account.ID)
+		if aTie != bTie {
+			return aTie < bTie
+		}
+		switch {
+		case a.account.LastUsedAt == nil && b.account.LastUsedAt != nil:
+			return true
+		case a.account.LastUsedAt != nil && b.account.LastUsedAt == nil:
+			return false
+		case a.account.LastUsedAt == nil && b.account.LastUsedAt == nil:
+			return a.account.ID < b.account.ID
+		default:
+			if !a.account.LastUsedAt.Equal(*b.account.LastUsedAt) {
+				return a.account.LastUsedAt.Before(*b.account.LastUsedAt)
+			}
+			return a.account.ID < b.account.ID
+		}
+	})
+	return ordered
+}
+
+func openAIWaitTieKey(seed uint64, accountID int64) uint64 {
+	// SplitMix64 provides a cheap, deterministic permutation of the account ID
+	// for the request seed without adding shared mutable scheduler state.
+	z := seed + uint64(accountID) + 0x9e3779b97f4a7c15
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	return z ^ (z >> 31)
 }
 
 func openAICostOverflowExpanded(req OpenAIAccountScheduleRequest, plan openAIAccountLoadPlan) bool {
@@ -1683,10 +1766,17 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 	if budget != nil && budget.limited {
 		passes = 4
 	}
+	waitOrder := attempt.waitOrder
+	if len(waitOrder) == 0 {
+		waitOrder = attempt.selectionOrder
+	}
+	waitCandidates := make([]AccountWaitCandidate, 0, len(waitOrder))
+	waitCandidateIDs := make(map[int64]struct{}, len(waitOrder))
+	var firstWaitAccount *Account
 	for pass := 0; pass < passes; pass++ {
 		wantAttempted := pass == 1 || pass == 3
 		wantKnownFull := pass >= 2
-		for _, candidate := range attempt.selectionOrder {
+		for _, candidate := range waitOrder {
 			if candidate.account == nil {
 				continue
 			}
@@ -1712,16 +1802,29 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 				compactBlocked = true
 				continue
 			}
-			return attachSelectionProfitGate(ctx, &AccountSelectionResult{
-				Account: fresh,
-				WaitPlan: &AccountWaitPlan{
-					AccountID:      fresh.ID,
+			if _, exists := waitCandidateIDs[fresh.ID]; !exists {
+				waitCandidateIDs[fresh.ID] = struct{}{}
+				waitCandidates = append(waitCandidates, AccountWaitCandidate{
+					Account:        fresh,
 					MaxConcurrency: fresh.Concurrency,
-					Timeout:        cfg.FallbackWaitTimeout,
-					MaxWaiting:     cfg.FallbackMaxWaiting,
-				},
-			}), candidateCount, topK, loadSkew, nil
+				})
+				if firstWaitAccount == nil {
+					firstWaitAccount = fresh
+				}
+			}
 		}
+	}
+	if firstWaitAccount != nil {
+		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
+			Account: firstWaitAccount,
+			WaitPlan: &AccountWaitPlan{
+				AccountID:      firstWaitAccount.ID,
+				MaxConcurrency: firstWaitAccount.Concurrency,
+				Timeout:        cfg.FallbackWaitTimeout,
+				MaxWaiting:     cfg.FallbackMaxWaiting,
+				Candidates:     waitCandidates,
+			},
+		}), candidateCount, topK, loadSkew, nil
 	}
 
 	return nil, candidateCount, topK, loadSkew, noAvailableOpenAISelectionError(req.RequestedModel, compactBlocked, filterStats.summary("selection_order_exhausted"))

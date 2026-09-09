@@ -1443,6 +1443,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	if requireCompact {
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}
+	waitCandidates := make([]AccountWaitCandidate, 0, len(candidates))
+	waitCandidateIDs := make(map[int64]struct{}, len(candidates))
+	var firstWaitAccount *Account
 	for _, acc := range candidates {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {
@@ -1455,11 +1458,25 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			continue
 		}
-		return s.newSelectionResult(ctx, fresh, false, nil, &AccountWaitPlan{
-			AccountID:      fresh.ID,
+		if _, exists := waitCandidateIDs[fresh.ID]; exists {
+			continue
+		}
+		waitCandidateIDs[fresh.ID] = struct{}{}
+		waitCandidates = append(waitCandidates, AccountWaitCandidate{
+			Account:        fresh,
 			MaxConcurrency: fresh.Concurrency,
+		})
+		if firstWaitAccount == nil {
+			firstWaitAccount = fresh
+		}
+	}
+	if firstWaitAccount != nil {
+		return s.newSelectionResult(ctx, firstWaitAccount, false, nil, &AccountWaitPlan{
+			AccountID:      firstWaitAccount.ID,
+			MaxConcurrency: firstWaitAccount.Concurrency,
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
+			Candidates:     waitCandidates,
 		})
 	}
 

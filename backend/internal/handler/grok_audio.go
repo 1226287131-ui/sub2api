@@ -78,6 +78,8 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		var streamStarted bool
 		var slotStatus openAISlotAcquireResult
 		release, slotStatus = h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", candidate, false, &streamStarted, reqLog)
+		// A dynamic wait may acquire a slot on another eligible account.
+		account = candidate.Account
 		if slotStatus != openAISlotAcquireOK {
 			if slotStatus == openAISlotAcquireFailed {
 				return
@@ -248,6 +250,8 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		account := selection.Account
 		var started bool
 		release, status := h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", selection, false, &started, reqLog)
+		// A dynamic wait may acquire a slot on another eligible account.
+		account = selection.Account
 		if status == openAISlotAcquireProfitVetoed {
 			failed[account.ID] = struct{}{}
 			continue

@@ -573,6 +573,20 @@ type AccountWaitPlan struct {
 	MaxConcurrency int
 	Timeout        time.Duration
 	MaxWaiting     int
+	// Candidates contains alternate accounts that may be probed while waiting
+	// for a slot. It is intentionally optional so legacy callers keep the
+	// single-account wait behavior.
+	Candidates []AccountWaitCandidate
+}
+
+// AccountWaitCandidate is an account that can safely compete for the same
+// request's concurrency slot while the initially selected account is busy.
+// The scheduler populates this only after the account has passed its normal
+// eligibility checks; the handler still performs the final profit admission
+// check after a slot is acquired.
+type AccountWaitCandidate struct {
+	Account        *Account
+	MaxConcurrency int
 }
 
 type AccountSelectionResult struct {
