@@ -127,6 +127,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
+	if reqStream && h.gatewayService.SendOpenAIStreamPrimingEarly(c) {
+		streamStarted = true
+	}
 
 	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
 	if !acquired {
@@ -246,7 +249,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
-		writerSizeBeforeForward := c.Writer.Size()
+		// Keep the failover snapshot in the same semantic-byte coordinate system
+		// as the post-forward check.  The early priming frame (and any wait
+		// heartbeat) is deliberately excluded so a pre-output upstream failure
+		// can still retry another account.
+		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {

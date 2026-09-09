@@ -164,7 +164,8 @@ func StopOpenAICompactSSEKeepaliveCommitted(c *gin.Context) bool {
 	return committed
 }
 
-// OpenAICompactKeepaliveAdjustedWrittenSize 返回排除 SSE keepalive/priming 字节后
+// OpenAICompactKeepaliveAdjustedWrittenSize 返回排除 SSE keepalive/priming 和并发
+// 等待心跳字节后
 // 的响应已写字节数；无此类字节的请求等价于 c.Writer.Size()。这些字节不构成语义
 // 响应——handler 以"Forward 前后 Size 是否变化"判定是否已向客户端写出响应
 // （变化则放弃 failover 换号），该判定不得被这些字节污染，否则上游请求
@@ -177,6 +178,14 @@ func OpenAICompactKeepaliveAdjustedWrittenSize(c *gin.Context) int {
 	streamKeepaliveBytes := 0
 	if value, ok := c.Get(openAIStreamKeepaliveBytesKey); ok {
 		streamKeepaliveBytes, _ = value.(int)
+	}
+	// ConcurrencyHelper/UserMsgQueueHelper keepalive pings live in the handler
+	// package to avoid an import cycle.  They use this shared context key so
+	// OpenAI failover still treats a stream containing only wait heartbeats as
+	// pre-output and may safely retry another account.
+	gatewayHeartbeatBytes := 0
+	if value, ok := c.Get("gateway_stream_heartbeat_bytes"); ok {
+		gatewayHeartbeatBytes, _ = value.(int)
 	}
 	size := c.Writer.Size()
 	compactKeepaliveBytes := 0
@@ -191,7 +200,7 @@ func OpenAICompactKeepaliveAdjustedWrittenSize(c *gin.Context) int {
 	if size < 0 {
 		return size
 	}
-	keepaliveBytes := compactKeepaliveBytes + streamKeepaliveBytes
+	keepaliveBytes := compactKeepaliveBytes + streamKeepaliveBytes + gatewayHeartbeatBytes
 	if keepaliveBytes <= 0 {
 		return size
 	}

@@ -59,7 +59,12 @@ func (s *OpenAIGatewayService) newStreamHeaderWriter(c *gin.Context, upstream ht
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.Header().Set("X-Accel-Buffering", "no")
-		c.Writer.WriteHeader(http.StatusOK)
+		// An early priming frame may already have committed the 200 response.
+		// Re-applying WriteHeader after that point is noisy and can discard the
+		// response-header ordering guarantees of net/http.
+		if !c.Writer.Written() {
+			c.Writer.WriteHeader(http.StatusOK)
+		}
 	}
 }
 

@@ -298,6 +298,18 @@ func TestOpenAICompactKeepaliveAdjustedWrittenSize_ExcludesHeartbeatBytes(t *tes
 	require.Contains(t, rec.Body.String(), ": keepalive\n\n")
 }
 
+func TestOpenAICompactKeepaliveAdjustedWrittenSize_ExcludesGatewayWaitHeartbeatBytes(t *testing.T) {
+	c, rec := newCompactBridgeTestContext(t, false)
+	heartbeat := "data: {\"type\":\"ping\"}\n\n"
+	_, err := c.Writer.Write([]byte(heartbeat))
+	require.NoError(t, err)
+	c.Set("gateway_stream_heartbeat_bytes", len(heartbeat))
+
+	require.Equal(t, -1, OpenAICompactKeepaliveAdjustedWrittenSize(c))
+	require.False(t, openAIStreamClientOutputStarted(c, false))
+	require.Equal(t, heartbeat, rec.Body.String())
+}
+
 func TestOpenAIStreamClientOutputStarted_IgnoresCompactKeepaliveBytes(t *testing.T) {
 	c, _ := newCompactBridgeTestContext(t, true)
 	stop := StartOpenAICompactSSEKeepalive(c, keepaliveTestInterval)

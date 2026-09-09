@@ -584,6 +584,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
+	// Legacy/body-signal compact has its own SSE keepalive/bridge.  Priming it
+	// here would suspend that writer wrapper and could mix two protocol streams.
+	if reqStream && !legacyCompact && h.gatewayService.SendOpenAIStreamPrimingEarly(c) {
+		streamStarted = true
+	}
 
 	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
 	if !acquired {
@@ -1253,6 +1258,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
+	if reqStream && h.gatewayService.SendOpenAIStreamPrimingEarly(c) {
+		streamStarted = true
+	}
 
 	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
 	if !acquired {
@@ -1382,7 +1390,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		defaultMappedModel := strings.TrimSpace(effectiveMappedModel)
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
-		writerSizeBeforeForward := c.Writer.Size()
+		// Keep the failover snapshot in the same semantic-byte coordinate system
+		// as the post-forward check.  The early priming frame (and any wait
+		// heartbeat) is deliberately excluded so a pre-output upstream failure
+		// can still retry another account.
+		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1637,8 +1649,21 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 
 // ensureAnthropicErrorResponse writes a fallback Anthropic error if no response was written.
 func (h *OpenAIGatewayHandler) ensureAnthropicErrorResponse(c *gin.Context, streamStarted bool) bool {
-	if c == nil || c.Writer == nil || c.Writer.Written() {
+	if c == nil || c.Writer == nil {
 		return false
+	}
+	if service.IsResponseCommitted(c) {
+		return false
+	}
+	if c.Writer.Written() {
+		// The early OpenAI priming frame commits HTTP 200 before account and
+		// concurrency-slot selection, but it is deliberately excluded from the
+		// semantic-output byte count.  Anthropic clients still need an in-band
+		// error event when that preamble is followed by a failure.
+		if !streamStarted || service.OpenAICompactKeepaliveAdjustedWrittenSize(c) >= 0 {
+			return false
+		}
+		streamStarted = true
 	}
 	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
 	return true

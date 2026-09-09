@@ -89,6 +89,63 @@ func TestGatewayEnsureForwardErrorResponse_ResponsesRouteAfterWrittenEmitsRespon
 	assert.Contains(t, body, `"type":"response.failed"`)
 }
 
+// The OpenAI-compatible Messages endpoint may have already flushed the
+// non-semantic priming frame while it waits for an account slot.  A later
+// upstream failure must still terminate the Anthropic stream with an error
+// event instead of silently returning after the ping.
+func TestOpenAIGatewayEnsureAnthropicErrorResponse_AppendsAfterPriming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, EndpointMessages, nil)
+	c.Header("Content-Type", "text/event-stream")
+	priming := "event: ping\ndata: {\"type\":\"ping\"}\n\n"
+	_, _ = c.Writer.WriteString(priming)
+	// Keepalive/priming bytes are excluded from the semantic output count by
+	// the same request marker used by the service implementation.
+	c.Set("openai_stream_keepalive_bytes", len(priming))
+
+	h := &OpenAIGatewayHandler{}
+	wrote := h.ensureAnthropicErrorResponse(c, true)
+
+	require.True(t, wrote)
+	body := w.Body.String()
+	assert.Contains(t, body, priming)
+	assert.Contains(t, body, "event: error\n")
+	assert.Contains(t, body, "Upstream request failed")
+}
+
+func TestOpenAIGatewayEnsureAnthropicErrorResponse_DoesNotAppendAfterSemanticOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, EndpointMessages, nil)
+	c.Header("Content-Type", "text/event-stream")
+	_, _ = c.Writer.WriteString("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+
+	h := &OpenAIGatewayHandler{}
+	wrote := h.ensureAnthropicErrorResponse(c, true)
+
+	require.False(t, wrote)
+	assert.NotContains(t, w.Body.String(), "event: error\n")
+}
+
+func TestOpenAIForwardMayFailover_AllowsPrimingOnlyResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, EndpointChatCompletions, nil)
+	priming := "event: ping\ndata: {\"type\":\"ping\"}\n\n"
+	_, _ = c.Writer.WriteString(priming)
+	c.Set("openai_stream_keepalive_bytes", len(priming))
+
+	writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
+	retryable := &service.UpstreamFailoverError{SafeToFailoverAfterWrite: false}
+
+	require.Equal(t, -1, writerSizeBeforeForward)
+	require.True(t, openAIForwardMayFailover(c, writerSizeBeforeForward, retryable))
+}
+
 func TestGatewayForwardErrorAlreadyCommunicated(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
