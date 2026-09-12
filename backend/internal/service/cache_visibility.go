@@ -1,9 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
-
-	"github.com/tidwall/sjson"
+	"encoding/json"
 )
 
 // cacheCreationVisibilityContextKey is intentionally private so only gateway
@@ -26,50 +26,22 @@ func hideCacheCreationEnabled(ctx context.Context) bool {
 // JSON document. It deliberately operates on a copy of the serialized body;
 // callers must parse/observe usage before invoking it.
 func sanitizeCacheCreationJSON(body []byte) []byte {
-	paths := []string{
-		"usage.cache_creation",
-		"usage.cache_creation_input_tokens",
-		"usage.cache_creation_5m_tokens",
-		"usage.cache_creation_1h_tokens",
-		// OpenAI-compatible usage shapes use cache_write/cache_creation aliases,
-		// often nested below input_tokens_details or prompt_tokens_details.
-		"usage.cache_write_tokens",
-		"usage.cache_write_input_tokens",
-		"usage.cache_creation_tokens",
-		"usage.input_tokens_details.cache_write_tokens",
-		"usage.input_tokens_details.cache_creation_tokens",
-		"usage.prompt_tokens_details.cache_write_tokens",
-		"usage.prompt_tokens_details.cache_creation_tokens",
-		"response.usage.cache_creation",
-		"response.usage.cache_creation_input_tokens",
-		"response.usage.cache_creation_5m_tokens",
-		"response.usage.cache_creation_1h_tokens",
-		"response.usage.cache_write_tokens",
-		"response.usage.cache_write_input_tokens",
-		"response.usage.cache_creation_tokens",
-		"response.usage.input_tokens_details.cache_write_tokens",
-		"response.usage.input_tokens_details.cache_creation_tokens",
-		"response.usage.prompt_tokens_details.cache_write_tokens",
-		"response.usage.prompt_tokens_details.cache_creation_tokens",
-		"message.usage.cache_creation",
-		"message.usage.cache_creation_input_tokens",
-		"message.usage.cache_creation_5m_tokens",
-		"message.usage.cache_creation_1h_tokens",
-		"message.usage.cache_write_tokens",
-		"message.usage.cache_write_input_tokens",
-		"message.usage.cache_creation_tokens",
-		"message.usage.input_tokens_details.cache_write_tokens",
-		"message.usage.input_tokens_details.cache_creation_tokens",
-		"message.usage.prompt_tokens_details.cache_write_tokens",
-		"message.usage.prompt_tokens_details.cache_creation_tokens",
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return body
 	}
-	result := body
-	for _, path := range paths {
-		updated, err := sjson.DeleteBytes(result, path)
-		if err != nil {
-			return body
-		}
-		result = updated
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return body
+	}
+	if !sanitizeCacheCreationEvent(value) {
+		return body
+	}
+	result, err := json.Marshal(value)
+	if err != nil {
+		return body
 	}
 	return result
 }
