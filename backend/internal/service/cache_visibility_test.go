@@ -28,9 +28,10 @@ func TestHideCacheCreationContext(t *testing.T) {
 }
 
 func TestSanitizeCacheCreationJSONPreservesBillingPayloadOutsideResponse(t *testing.T) {
-	body := []byte(`{"usage":{"input_tokens":10,"cache_creation_input_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":7},"output_tokens":2},"message":{"usage":{"cache_creation_input_tokens":3}}}`)
+	body := []byte(`{"usage":{"input_tokens":10,"cache_creation_input_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":7},"input_tokens_details":{"cache_write_tokens":5},"output_tokens":2},"response":{"usage":{"prompt_tokens_details":{"cache_creation_tokens":4}}},"message":{"usage":{"cache_creation_input_tokens":3}}}`)
 	got := string(sanitizeCacheCreationJSON(body))
 	require.NotContains(t, got, "cache_creation")
+	require.NotContains(t, got, "cache_write_tokens")
 	require.Contains(t, got, "input_tokens")
 	require.Contains(t, got, "output_tokens")
 }
@@ -38,6 +39,7 @@ func TestSanitizeCacheCreationJSONPreservesBillingPayloadOutsideResponse(t *test
 func TestSanitizeCacheCreationEvent(t *testing.T) {
 	event := map[string]any{"message": map[string]any{"usage": map[string]any{
 		"cache_creation_input_tokens": float64(8),
+		"cache_write_tokens":          float64(4),
 		"input_tokens":                float64(2),
 	}}}
 	require.True(t, sanitizeCacheCreationEvent(event))

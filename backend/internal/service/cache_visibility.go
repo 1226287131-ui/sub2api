@@ -31,10 +31,37 @@ func sanitizeCacheCreationJSON(body []byte) []byte {
 		"usage.cache_creation_input_tokens",
 		"usage.cache_creation_5m_tokens",
 		"usage.cache_creation_1h_tokens",
+		// OpenAI-compatible usage shapes use cache_write/cache_creation aliases,
+		// often nested below input_tokens_details or prompt_tokens_details.
+		"usage.cache_write_tokens",
+		"usage.cache_write_input_tokens",
+		"usage.cache_creation_tokens",
+		"usage.input_tokens_details.cache_write_tokens",
+		"usage.input_tokens_details.cache_creation_tokens",
+		"usage.prompt_tokens_details.cache_write_tokens",
+		"usage.prompt_tokens_details.cache_creation_tokens",
+		"response.usage.cache_creation",
+		"response.usage.cache_creation_input_tokens",
+		"response.usage.cache_creation_5m_tokens",
+		"response.usage.cache_creation_1h_tokens",
+		"response.usage.cache_write_tokens",
+		"response.usage.cache_write_input_tokens",
+		"response.usage.cache_creation_tokens",
+		"response.usage.input_tokens_details.cache_write_tokens",
+		"response.usage.input_tokens_details.cache_creation_tokens",
+		"response.usage.prompt_tokens_details.cache_write_tokens",
+		"response.usage.prompt_tokens_details.cache_creation_tokens",
 		"message.usage.cache_creation",
 		"message.usage.cache_creation_input_tokens",
 		"message.usage.cache_creation_5m_tokens",
 		"message.usage.cache_creation_1h_tokens",
+		"message.usage.cache_write_tokens",
+		"message.usage.cache_write_input_tokens",
+		"message.usage.cache_creation_tokens",
+		"message.usage.input_tokens_details.cache_write_tokens",
+		"message.usage.input_tokens_details.cache_creation_tokens",
+		"message.usage.prompt_tokens_details.cache_write_tokens",
+		"message.usage.prompt_tokens_details.cache_creation_tokens",
 	}
 	result := body
 	for _, path := range paths {
@@ -55,7 +82,9 @@ func sanitizeCacheCreationEvent(value any) bool {
 	case map[string]any:
 		for key, child := range node {
 			if key == "cache_creation" || key == "cache_creation_input_tokens" ||
-				key == "cache_creation_5m_tokens" || key == "cache_creation_1h_tokens" {
+				key == "cache_creation_5m_tokens" || key == "cache_creation_1h_tokens" ||
+				key == "cache_write_tokens" || key == "cache_write_input_tokens" ||
+				key == "cache_creation_tokens" {
 				delete(node, key)
 				changed = true
 				continue
