@@ -672,7 +672,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			// creation fields only from this client-facing SSE event when the
 			// channel policy is enabled.
 			if hideCacheCreationEnabled(ctx) {
-				if sanitizedData, sanitized := sanitizeCacheCreationJSON(dataBytes); !bytes.Equal(sanitizedData, dataBytes) {
+				if sanitizedData := sanitizeCacheCreationJSON(dataBytes); !bytes.Equal(sanitizedData, dataBytes) {
 					dataBytes = sanitizedData
 					data = string(sanitizedData)
 					line = "data: " + data
