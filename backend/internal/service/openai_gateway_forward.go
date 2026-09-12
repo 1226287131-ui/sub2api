@@ -77,7 +77,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		body = sanitizedToolBody
 	}
 	if account.IsOpenAIOAuthLike() {
-		reasoningBody, reasoningChanged, reasoningErr := normalizeOpenAIResponsesReasoningMode(body)
+		_, reasoningModel := resolveOpenAIForwardMappedModels(account, gjson.GetBytes(body, "model").String(), isOpenAIResponsesCompactPath(c))
+		reasoningBody, reasoningChanged, reasoningErr := normalizeOpenAIResponsesReasoningMode(body, reasoningModel)
 		if reasoningErr != nil {
 			return nil, fmt.Errorf("normalize OpenAI Responses reasoning.mode: %w", reasoningErr)
 		}

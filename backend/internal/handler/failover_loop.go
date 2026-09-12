@@ -59,47 +59,51 @@ func sameAccountRetryDelayFor(failoverErr *service.UpstreamFailoverError, retryC
 	if failoverErr == nil {
 		return sameAccountRetryDelay
 	}
-	if failoverErr.SameAccountRetryDelay > 0 {
-		return failoverErr.SameAccountRetryDelay
-	}
-	if !failoverErr.RequestScopedTransient || retryCount <= 1 {
-		return sameAccountRetryDelay
+	exponentialBackoff := failoverErr.RequestScopedTransient
+	if failoverErr.RetryableOnSameAccount {
+		switch failoverErr.StatusCode {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			exponentialBackoff = true
+		}
 	}
 
 	delay := sameAccountRetryDelay
-	for i := 1; i < retryCount; i++ {
-		if delay >= maxRequestScopedRetryDelay/2 {
-			return maxRequestScopedRetryDelay
+	if exponentialBackoff {
+		for i := 1; i < retryCount; i++ {
+			if delay >= maxRequestScopedRetryDelay/2 {
+				delay = maxRequestScopedRetryDelay
+				break
+			}
+			delay *= 2
 		}
-		delay *= 2
+	}
+	// An upstream retry delay is a floor, not a replacement for local backoff.
+	if failoverErr.SameAccountRetryDelay > delay {
+		delay = failoverErr.SameAccountRetryDelay
 	}
 	return delay
 }
 
 func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCount, retryLimit int) bool {
-	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
+	return sameAccountRetryAllowedAt(failoverErr, retryCount, retryLimit, time.Now())
+}
+
+func sameAccountRetryAllowedAt(failoverErr *service.UpstreamFailoverError, retryCount, retryLimit int, now time.Time) bool {
+	if failoverErr == nil || !failoverErr.RetryableOnSameAccount || retryLimit <= 0 || retryCount < 0 {
 		return false
 	}
-	if !sameAccountRetryDeadlineAllows(failoverErr) {
+	if failoverErr.SameAccountRetryMax > 0 && failoverErr.SameAccountRetryMax < retryLimit {
+		retryLimit = failoverErr.SameAccountRetryMax
+	}
+	if retryCount >= retryLimit {
 		return false
 	}
-	// Error-specific caps (Grok capacity/stream-idle) remain hard limits even
-	// when the error also carries a freshly reconstructed deadline.
-	if failoverErr.SameAccountRetryMax > 0 {
-		if retryLimit <= 0 {
-			return false
-		}
-		if failoverErr.SameAccountRetryMax < retryLimit {
-			retryLimit = failoverErr.SameAccountRetryMax
-		}
-		return retryCount < retryLimit
-	}
-	// OAuth 429 explicitly opts into a deadline window. It is intentionally not
-	// bounded by the ordinary/default pool retry count.
-	if !failoverErr.SameAccountRetryDeadline.IsZero() {
+	if failoverErr.SameAccountRetryDeadline.IsZero() {
 		return true
 	}
-	return retryLimit > 0 && retryCount < retryLimit
+	// The next attempt must fit both the retry count and its backoff window.
+	nextAttemptAt := now.Add(sameAccountRetryDelayFor(failoverErr, retryCount+1))
+	return nextAttemptAt.Before(failoverErr.SameAccountRetryDeadline)
 }
 
 // sameAccountRetryDeadlineAllows prevents a retry from starting after the
@@ -230,7 +234,12 @@ func (s *FailoverState) HandleFailoverError(
 		if !sleepWithContext(ctx, retryDelay) {
 			return FailoverCanceled
 		}
-		return FailoverContinue
+		if sameAccountRetryDeadlineAllows(failoverErr) {
+			return FailoverContinue
+		}
+		if needForceCacheBilling(s.hasBoundSession, failoverErr, false) {
+			s.ForceCacheBilling = true
+		}
 	}
 
 	// 同账号重试用尽，执行临时封禁

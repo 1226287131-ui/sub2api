@@ -104,6 +104,18 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 	}()
 	beginUpstreamResponseModelObservation(c)
+	// Resolve channel visibility once per request. The flag only affects fields
+	// serialized back to the client; upstream observation, billing, and usage
+	// logs continue to receive the complete cache creation values.
+	if account != nil && parsed.GroupID != nil && s.channelService != nil {
+		if channel, channelErr := s.channelService.GetChannelForGroup(ctx, *parsed.GroupID); channelErr == nil && channel != nil {
+			if override := channel.HideCacheCreationOverride(account.Platform); override != nil && *override {
+				ctx = withHideCacheCreation(ctx)
+			}
+		} else if channelErr != nil {
+			slog.Warn("failed to resolve cache visibility channel", "group_id", *parsed.GroupID, "error", channelErr)
+		}
+	}
 
 	// Web Search 模拟：纯 web_search 请求时，直接调用搜索 API 构造响应
 	if account != nil && s.shouldEmulateWebSearch(ctx, account, parsed.GroupID, parsed.Body.Bytes()) {

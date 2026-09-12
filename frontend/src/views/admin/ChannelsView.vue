@@ -369,6 +369,21 @@
               </div>
             </div>
 
+            <!-- Cache creation visibility (all platforms) -->
+            <div class="border-t border-gray-200 pt-3 dark:border-dark-600">
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <label class="text-xs font-medium text-gray-700 dark:text-gray-300">
+                    {{ t('admin.channels.form.hideCacheCreation') }}
+                  </label>
+                  <p class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+                    {{ t('admin.channels.form.hideCacheCreationHint') }}
+                  </p>
+                </div>
+                <Toggle v-model="section.hide_cache_creation" />
+              </div>
+            </div>
+
             <!-- Model Mapping -->
             <div>
               <div class="mb-1 flex items-center justify-between">
@@ -687,6 +702,7 @@ interface PlatformSection {
   web_search_emulation: boolean
   codex_image_generation_bridge: boolean
   bedrock_cc_compat: boolean
+  hide_cache_creation: boolean
   account_stats_pricing_rules: FormPricingRule[]
 }
 
@@ -787,6 +803,7 @@ function addPlatformSection(platform: GroupPlatform) {
     web_search_emulation: false,
     codex_image_generation_bridge: false,
     bedrock_cc_compat: false,
+    hide_cache_creation: false,
     account_stats_pricing_rules: [],
   })
 }
@@ -1187,6 +1204,17 @@ function formToAPI(): { group_ids: number[], model_pricing: ChannelModelPricing[
     delete featuresConfig.bedrock_cc_compat
   }
 
+  const hideCacheCreation: Record<string, boolean> = {}
+  for (const section of form.platforms) {
+    if (!section.enabled) continue
+    hideCacheCreation[section.platform] = !!section.hide_cache_creation
+  }
+  if (Object.keys(hideCacheCreation).length > 0) {
+    featuresConfig.hide_cache_creation = hideCacheCreation
+  } else {
+    delete featuresConfig.hide_cache_creation
+  }
+
   return { group_ids: uniqueGroupIds, model_pricing, model_mapping, features_config: featuresConfig }
 }
 
@@ -1252,6 +1280,10 @@ function apiToForm(channel: Channel): PlatformSection[] {
     const codexImageGenerationBridge = fc?.codex_image_generation_bridge as Record<string, boolean> | undefined
     const codexImageGenerationBridgeEnabled = codexImageGenerationBridge?.[platform] === true
     const bedrockCCCompatEnabled = fc?.bedrock_cc_compat === true
+    const hideCacheCreation = fc?.hide_cache_creation
+    const hideCacheCreationEnabled = typeof hideCacheCreation === 'boolean'
+      ? hideCacheCreation
+      : (hideCacheCreation as Record<string, boolean> | undefined)?.[platform] === true
 
     sections.push({
       platform,
@@ -1263,6 +1295,7 @@ function apiToForm(channel: Channel): PlatformSection[] {
       web_search_emulation: webSearchEnabled,
       codex_image_generation_bridge: codexImageGenerationBridgeEnabled,
       bedrock_cc_compat: bedrockCCCompatEnabled,
+      hide_cache_creation: hideCacheCreationEnabled,
       account_stats_pricing_rules: [],
     })
   }

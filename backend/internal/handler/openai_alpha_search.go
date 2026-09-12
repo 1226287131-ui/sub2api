@@ -239,7 +239,9 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 					return
 				case <-time.After(retryDelay):
 				}
-				continue
+				if sameAccountRetryDeadlineAllows(failoverErr) {
+					continue
+				}
 			}
 		}
 		h.gatewayService.RecordOpenAIAccountSwitch()

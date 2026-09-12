@@ -361,10 +361,49 @@ func TestOpenAIHTTP429StillUsesQuotaResetHeaders(t *testing.T) {
 	require.Greater(t, time.Until(blockedUntil), 6*24*time.Hour, "real HTTP 429 must retain the upstream quota reset")
 }
 
-func TestOpenAI429RetryDelayHonorsBoundedRetryAfter(t *testing.T) {
+func TestOpenAI429RetryDelayNeverShortensRetryAfter(t *testing.T) {
 	deadline := time.Now().Add(openAIOAuth429RetryWindow)
 	require.Equal(t, openAIOAuth429RetryDelay, openAIOAuth429SameAccountRetryDelay(nil, deadline))
-	require.Equal(t, openAIOAuth429MaxRetryDelay, openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"90"}}, deadline))
+	require.Equal(t, 90*time.Second, openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"90"}}, deadline))
+	require.Equal(t, 300*time.Second, openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"300"}}, deadline))
+	require.Equal(t, openAIOAuth429RetryDelay, openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"0.1"}}, deadline))
+}
+
+func TestOpenAI429RetryAfterCoolsSharedAccountBeforeAnotherRetry(t *testing.T) {
+	for _, accountType := range []string{AccountTypeOAuth, AccountTypeSetupToken, AccountTypeAPIKey} {
+		t.Run(accountType, func(t *testing.T) {
+			repo := &oauth429RateLimitRepo{}
+			rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+			svc := &OpenAIGatewayService{rateLimitService: rateLimits}
+			rateLimits.SetAccountRuntimeBlocker(svc)
+			account := &Account{ID: 43, Platform: PlatformOpenAI, Type: accountType}
+			headers := http.Header{"Retry-After": []string{"90"}}
+			before := time.Now()
+
+			require.False(t, svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, headers, nil))
+			require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			require.Equal(t, 1, repo.setRateLimitedCalls)
+			require.False(t, repo.lastRateLimitedUntil.Before(before.Add(90*time.Second)))
+			require.False(t, svc.ShouldRetryOpenAIOAuth429(account, headers, nil))
+			require.False(t, svc.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(account, http.StatusTooManyRequests, false, headers, nil))
+		})
+	}
+}
+
+func TestRetryAfterParsingRejectsInvalidNumbersAndAvoidsOverflow(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+	for _, raw := range []string{"NaN", "+Inf", "-Inf", "-1", "invalid"} {
+		t.Run(raw, func(t *testing.T) {
+			require.Nil(t, parseRetryAfterResetTime(http.Header{"Retry-After": []string{raw}}, now))
+		})
+	}
+	for _, raw := range []string{"90", "0.5", "1e100", now.Add(90 * time.Second).Format(http.TimeFormat)} {
+		t.Run(raw, func(t *testing.T) {
+			resetAt := parseRetryAfterResetTime(http.Header{"Retry-After": []string{raw}}, now)
+			require.NotNil(t, resetAt)
+			require.True(t, resetAt.After(now), "a large delay must not wrap into the past")
+		})
+	}
 }
 
 func TestOpenAI429FastPath_OpenCodeGoUsageLimitUsesMessageResetDuration(t *testing.T) {

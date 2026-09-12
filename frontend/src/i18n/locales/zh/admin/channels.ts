@@ -200,6 +200,8 @@ export default {
         codexImageGenerationBridgeHint: '开启后，OpenAI 分组仅会为非 Responses Lite 的 Codex /responses 文本请求自动注入 hosted image_generation 工具。桥接不会为 Responses Lite 注入工具；本地 image_gen 的处理由客户端和账号策略决定。仅在路由账号支持图片生成时开启。',
         bedrockCCCompat: 'Bedrock CC 兼容',
         bedrockCCCompatHint: '⚠️ 开启后，该渠道下 Bedrock 账号的请求将进行 Claude Code 兼容处理（thinking 类型转换、tool_use ID 清理）',
+        hideCacheCreation: '隐藏缓存创建',
+        hideCacheCreationHint: '开启后，向下游返回的用量中不显示缓存创建字段；内部计费和使用记录保持不变。',
         basicSettings: '基础设置',
         addPlatform: '添加平台',
         noPlatforms: '点击"添加平台"开始配置渠道',

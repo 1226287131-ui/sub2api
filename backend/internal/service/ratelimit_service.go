@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -1164,6 +1165,17 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
 		s.persistOpenAICodexSnapshot(ctx, account, headers)
 		notifyOpenAIAutoReset(account.ID)
+		// A concrete Retry-After is shared account backpressure, not a private
+		// retry loop for every concurrent request. Explicit quota resets take priority.
+		if disposition, resetAt := classifyOpenAIOAuth429(headers, responseBody); disposition == openAIOAuth429RetryAfter && resetAt != nil {
+			s.notifyAccountSchedulingBlocked(account, *resetAt, "429_retry_after")
+			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+				return
+			}
+			slog.Info("openai_account_rate_limited", "account_id", account.ID, "reset_at", *resetAt, "reason", "retry_after")
+			return
+		}
 		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
 			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
@@ -2395,7 +2407,14 @@ func parseRetryAfterResetTime(headers http.Header, now time.Time) *time.Time {
 		return nil
 	}
 	if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
-		resetAt := now.Add(time.Duration(seconds * float64(time.Second)))
+		if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 {
+			return nil
+		}
+		delay := time.Duration(math.MaxInt64)
+		if seconds < float64(math.MaxInt64)/float64(time.Second) {
+			delay = time.Duration(seconds * float64(time.Second))
+		}
+		resetAt := now.Add(delay)
 		return &resetAt
 	}
 	if parsed, err := http.ParseTime(raw); err == nil {

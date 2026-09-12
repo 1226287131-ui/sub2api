@@ -981,6 +981,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		}
 
 		usagePatch := s.extractSSEUsagePatch(event)
+		if hideCacheCreationEnabled(ctx) && sanitizeCacheCreationEvent(event) {
+			eventChanged = true
+		}
 		if anthropicStreamEventIsTerminal(eventName, dataLine) {
 			sawTerminalEvent = true
 		}
@@ -1460,6 +1463,9 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 	}
 
 	body = reverseToolNamesIfPresent(c, body)
+	if hideCacheCreationEnabled(ctx) {
+		body = sanitizeCacheCreationJSON(body)
+	}
 
 	// 写入响应
 	c.Data(resp.StatusCode, contentType, body)

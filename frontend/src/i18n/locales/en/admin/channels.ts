@@ -200,6 +200,8 @@ export default {
         codexImageGenerationBridgeHint: 'When enabled, only non-Responses Lite Codex /responses text requests in OpenAI groups receive the hosted image_generation tool. The bridge does not inject tools for Responses Lite; local image_gen handling follows the client and account policy. Leave this off unless routed accounts support image generation.',
         bedrockCCCompat: 'Bedrock CC Compatibility',
         bedrockCCCompatHint: '⚠️ When enabled, requests to Bedrock accounts in this channel will be transformed for Claude Code compatibility (thinking type conversion, tool_use ID sanitization).',
+        hideCacheCreation: 'Hide cache creation',
+        hideCacheCreationHint: 'Hide cache creation fields from downstream usage responses while keeping internal billing and usage records unchanged.',
         basicSettings: 'Basic Settings',
         addPlatform: 'Add Platform',
         noPlatforms: 'Click "Add Platform" to start configuring the channel',

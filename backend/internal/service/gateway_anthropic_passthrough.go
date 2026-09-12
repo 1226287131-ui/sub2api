@@ -543,6 +543,12 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					firstTokenMs = &ms
 				}
 				parseSSEUsagePassthrough(data, usage)
+				if hideCacheCreationEnabled(ctx) && trimmed != "" && trimmed != "[DONE]" {
+					sanitized := sanitizeCacheCreationJSON([]byte(trimmed))
+					if string(sanitized) != trimmed {
+						line = "data: " + string(sanitized)
+					}
+				}
 			} else {
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "event:") && anthropicStreamEventIsTerminal(strings.TrimSpace(strings.TrimPrefix(trimmed, "event:")), "") {
@@ -885,6 +891,9 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 		contentType = "application/json"
 	}
 	body = reverseToolNamesIfPresent(c, body)
+	if hideCacheCreationEnabled(ctx) {
+		body = sanitizeCacheCreationJSON(body)
+	}
 	c.Data(resp.StatusCode, contentType, body)
 	return usage, nil
 }

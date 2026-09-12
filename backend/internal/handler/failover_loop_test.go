@@ -10,6 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,69 +33,77 @@ func (m *mockTempUnscheduler) TempUnscheduleRetryableError(_ context.Context, ac
 }
 
 func TestSameAccountRetryDelayFor(t *testing.T) {
-	capacityErr := &service.UpstreamFailoverError{RequestScopedTransient: true}
-
 	for _, tc := range []struct {
 		name       string
+		err        *service.UpstreamFailoverError
 		retryCount int
 		want       time.Duration
 	}{
-		{name: "first retry", retryCount: 1, want: 500 * time.Millisecond},
-		{name: "second retry", retryCount: 2, want: time.Second},
-		{name: "third retry", retryCount: 3, want: 2 * time.Second},
-		{name: "fourth retry", retryCount: 4, want: 4 * time.Second},
-		{name: "fifth retry", retryCount: 5, want: 8 * time.Second},
-		{name: "capped retry", retryCount: 10, want: 8 * time.Second},
+		{name: "nil error", retryCount: 10, want: 500 * time.Millisecond},
+		{name: "legacy fixed delay", err: &service.UpstreamFailoverError{}, retryCount: 10, want: 500 * time.Millisecond},
+		{name: "first transient retry", err: &service.UpstreamFailoverError{RequestScopedTransient: true}, retryCount: 1, want: 500 * time.Millisecond},
+		{name: "second transient retry", err: &service.UpstreamFailoverError{RequestScopedTransient: true}, retryCount: 2, want: time.Second},
+		{name: "third transient retry", err: &service.UpstreamFailoverError{RequestScopedTransient: true}, retryCount: 3, want: 2 * time.Second},
+		{name: "fourth transient retry", err: &service.UpstreamFailoverError{RequestScopedTransient: true}, retryCount: 4, want: 4 * time.Second},
+		{name: "fifth transient retry", err: &service.UpstreamFailoverError{RequestScopedTransient: true}, retryCount: 5, want: 8 * time.Second},
+		{name: "capped transient retry", err: &service.UpstreamFailoverError{RequestScopedTransient: true}, retryCount: 10, want: 8 * time.Second},
+		{name: "429 opted in", err: &service.UpstreamFailoverError{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true}, retryCount: 3, want: 2 * time.Second},
+		{name: "502 opted in", err: &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway, RetryableOnSameAccount: true}, retryCount: 3, want: 2 * time.Second},
+		{name: "503 opted in", err: &service.UpstreamFailoverError{StatusCode: http.StatusServiceUnavailable, RetryableOnSameAccount: true}, retryCount: 3, want: 2 * time.Second},
+		{name: "504 opted in", err: &service.UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout, RetryableOnSameAccount: true}, retryCount: 3, want: 2 * time.Second},
+		{name: "503 without opt in", err: &service.UpstreamFailoverError{StatusCode: http.StatusServiceUnavailable}, retryCount: 3, want: 500 * time.Millisecond},
+		{name: "explicit delay floor", err: &service.UpstreamFailoverError{SameAccountRetryDelay: 3 * time.Second, RequestScopedTransient: true}, retryCount: 1, want: 3 * time.Second},
+		{name: "backoff overtakes explicit floor", err: &service.UpstreamFailoverError{SameAccountRetryDelay: 500 * time.Millisecond, RequestScopedTransient: true}, retryCount: 3, want: 2 * time.Second},
+		{name: "upstream delay exceeds backoff cap", err: &service.UpstreamFailoverError{SameAccountRetryDelay: 90 * time.Second, RequestScopedTransient: true}, retryCount: 10, want: 90 * time.Second},
+		{name: "short explicit delay cannot weaken backoff", err: &service.UpstreamFailoverError{SameAccountRetryDelay: time.Nanosecond}, retryCount: 1, want: 500 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, sameAccountRetryDelayFor(capacityErr, tc.retryCount))
+			assert.Equal(t, tc.want, sameAccountRetryDelayFor(tc.err, tc.retryCount))
 		})
 	}
-
-	t.Run("non request scoped errors keep fixed delay", func(t *testing.T) {
-		require.Equal(t, 500*time.Millisecond, sameAccountRetryDelayFor(&service.UpstreamFailoverError{}, 10))
-	})
-
-	t.Run("nil error keeps fixed delay", func(t *testing.T) {
-		require.Equal(t, 500*time.Millisecond, sameAccountRetryDelayFor(nil, 10))
-	})
-
-	t.Run("explicit oauth delay wins", func(t *testing.T) {
-		err := &service.UpstreamFailoverError{SameAccountRetryDelay: 3 * time.Second}
-		require.Equal(t, 3*time.Second, sameAccountRetryDelayFor(err, 1))
-	})
 }
 
-func TestSameAccountRetryAllowedUsesDeadlineInsteadOfPoolCount(t *testing.T) {
-	err := &service.UpstreamFailoverError{
-		RetryableOnSameAccount:   true,
-		SameAccountRetryDeadline: time.Now().Add(time.Minute),
+func TestSameAccountRetryAllowedHonorsCountAndBackoffDeadline(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name         string
+		retryCount   int
+		retryLimit   int
+		errorMax     int
+		deadline     time.Time
+		explicitWait time.Duration
+		disabled     bool
+		want         bool
+	}{
+		{name: "first retry", retryLimit: 3, want: true},
+		{name: "last permitted retry", retryCount: 2, retryLimit: 3, want: true},
+		{name: "count exhausted", retryCount: 3, retryLimit: 3},
+		{name: "deadline does not bypass count", retryCount: 3, retryLimit: 3, deadline: now.Add(time.Minute)},
+		{name: "explicit zero remains disabled", retryLimit: 0, deadline: now.Add(time.Minute)},
+		{name: "negative limit remains disabled", retryLimit: -1, deadline: now.Add(time.Minute)},
+		{name: "requires opt in", retryLimit: 3, deadline: now.Add(time.Minute), disabled: true},
+		{name: "error cap permits first retry", retryLimit: 3, errorMax: 1, deadline: now.Add(time.Minute), want: true},
+		{name: "error cap exhausted", retryCount: 1, retryLimit: 3, errorMax: 1, deadline: now.Add(time.Minute)},
+		{name: "account cap remains smaller", retryCount: 1, retryLimit: 1, errorMax: 3, deadline: now.Add(time.Minute)},
+		{name: "deadline already expired", retryLimit: 3, deadline: now.Add(-time.Second)},
+		{name: "backoff reaches deadline", retryLimit: 3, deadline: now.Add(500 * time.Millisecond)},
+		{name: "backoff fits deadline", retryLimit: 3, deadline: now.Add(500*time.Millisecond + time.Nanosecond), want: true},
+		{name: "second retry backoff exceeds remaining time", retryCount: 1, retryLimit: 3, deadline: now.Add(750 * time.Millisecond)},
+		{name: "upstream minimum wait exceeds deadline", retryLimit: 3, deadline: now.Add(time.Minute), explicitWait: 90 * time.Second},
+		{name: "upstream minimum wait fits deadline", retryLimit: 3, deadline: now.Add(2 * time.Minute), explicitWait: 90 * time.Second, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &service.UpstreamFailoverError{
+				StatusCode:               http.StatusTooManyRequests,
+				RetryableOnSameAccount:   !tc.disabled,
+				SameAccountRetryDeadline: tc.deadline,
+				SameAccountRetryDelay:    tc.explicitWait,
+				SameAccountRetryMax:      tc.errorMax,
+			}
+			assert.Equal(t, tc.want, sameAccountRetryAllowedAt(err, tc.retryCount, tc.retryLimit, now))
+		})
 	}
-	require.True(t, sameAccountRetryAllowed(err, 100, 0))
-	require.True(t, sameAccountRetryAllowed(err, 100, maxSameAccountRetries))
-	err.SameAccountRetryDeadline = time.Now().Add(-time.Second)
-	require.False(t, sameAccountRetryAllowed(err, 0, 100))
-}
-
-func TestSameAccountRetryAllowedRequiresOptInAndDefaultsToCountLimit(t *testing.T) {
-	err := &service.UpstreamFailoverError{SameAccountRetryDeadline: time.Now().Add(time.Minute)}
-	require.False(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries))
-
-	err.RetryableOnSameAccount = true
-	err.SameAccountRetryDeadline = time.Time{}
-	require.True(t, sameAccountRetryAllowed(err, maxSameAccountRetries-1, maxSameAccountRetries))
-	require.False(t, sameAccountRetryAllowed(err, maxSameAccountRetries, maxSameAccountRetries))
-}
-
-func TestSameAccountRetryAllowedHonorsErrorMaxBeforeDeadline(t *testing.T) {
-	err := &service.UpstreamFailoverError{
-		RetryableOnSameAccount:   true,
-		SameAccountRetryDeadline: time.Now().Add(time.Minute),
-		SameAccountRetryMax:      1,
-	}
-	require.True(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries))
-	require.False(t, sameAccountRetryAllowed(err, 1, maxSameAccountRetries))
-	require.False(t, sameAccountRetryAllowed(err, 0, 0), "an explicit zero retry budget remains disabled")
+	assert.False(t, sameAccountRetryAllowedAt(nil, 0, 3, now))
 }
 
 func TestSameAccountRetryDeadlineAllows(t *testing.T) {
@@ -374,20 +383,40 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 		require.Zero(t, fs.SwitchCount)
 	})
 
-	t.Run("OAuth deadline存在时不按普通计数切换", func(t *testing.T) {
+	t.Run("OAuth deadline cannot bypass exhausted retry count", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
 		fs := NewFailoverState(3, true)
 		fs.SameAccountRetryCount[100] = maxSameAccountRetries
 		err := newTestFailoverErr(http.StatusTooManyRequests, true, false)
 		err.SameAccountRetryDeadline = time.Now().Add(time.Minute)
-		err.SameAccountRetryDelay = time.Nanosecond
 
-		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
 
-		require.False(t, fs.ForceCacheBilling)
-		require.Zero(t, fs.SwitchCount)
-		require.Equal(t, maxSameAccountRetries+1, fs.SameAccountRetryCount[100])
-		require.Empty(t, mock.calls)
+		assert.Equal(t, FailoverContinue, action)
+		assert.True(t, fs.ForceCacheBilling)
+		assert.Equal(t, 1, fs.SwitchCount)
+		assert.Equal(t, maxSameAccountRetries, fs.SameAccountRetryCount[100])
+		assert.Contains(t, fs.FailedAccountIDs, int64(100))
+		require.Len(t, mock.calls, 1)
+		assert.Equal(t, int64(100), mock.calls[0].accountID)
+	})
+
+	t.Run("upstream wait beyond deadline does not start another same account attempt", func(t *testing.T) {
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(3, true)
+		err := newTestFailoverErr(http.StatusTooManyRequests, true, false)
+		err.SameAccountRetryDeadline = time.Now().Add(time.Hour)
+		err.SameAccountRetryDelay = 24 * time.Hour
+
+		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+
+		assert.Equal(t, FailoverContinue, action)
+		assert.True(t, fs.ForceCacheBilling)
+		assert.Zero(t, fs.SameAccountRetryCount[100])
+		assert.Equal(t, 1, fs.SwitchCount)
+		assert.Contains(t, fs.FailedAccountIDs, int64(100))
+		require.Len(t, mock.calls, 1)
+		assert.Equal(t, int64(100), mock.calls[0].accountID)
 	})
 
 	t.Run("同账号重试耗尽并实际切换时设置ForceCacheBilling", func(t *testing.T) {

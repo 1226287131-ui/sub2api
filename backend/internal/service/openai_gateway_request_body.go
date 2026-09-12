@@ -1019,12 +1019,16 @@ func normalizeOpenAIOAuthResponsesCompatibilityBody(body []byte) ([]byte, bool, 
 	return normalized, changed, nil
 }
 
-func normalizeOpenAIResponsesReasoningMode(body []byte) ([]byte, bool, error) {
+func normalizeOpenAIResponsesReasoningMode(body []byte, upstreamModel ...string) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
+	model := gjson.GetBytes(body, "model").String()
+	if len(upstreamModel) > 0 && strings.TrimSpace(upstreamModel[0]) != "" {
+		model = upstreamModel[0]
+	}
 	// Astra 的 reasoning.mode 与 reasoning.effort 是独立参数，不做兼容替换；非 Astra 维持旧 strip-mode/pro->max 行为。
-	if isOpenAIGPT6AstraModel(gjson.GetBytes(body, "model").String()) {
+	if isOpenAIGPT6AstraModel(model) {
 		return body, false, nil
 	}
 	mode := gjson.GetBytes(body, "reasoning.mode")

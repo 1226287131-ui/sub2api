@@ -4,6 +4,11 @@ import "strings"
 
 const featureKeyCodexImageGenerationBridge = "codex_image_generation_bridge"
 
+// featureKeyHideCacheCreation controls whether cache creation usage fields are
+// removed from responses sent to downstream clients. Billing and internal usage
+// observation always use the original upstream values.
+const featureKeyHideCacheCreation = "hide_cache_creation"
+
 const (
 	featureKeyCodexImageGenerationExplicitToolPolicy = "codex_image_generation_explicit_tool_policy"
 
@@ -67,6 +72,15 @@ func platformBoolOverride(values map[string]any, key string, platform string) *b
 		return boolOverridePtr(v)
 	}
 	return nil
+}
+
+// HideCacheCreationOverride returns the channel-level visibility override for
+// cache creation usage fields. Nil means preserve the upstream response.
+func (c *Channel) HideCacheCreationOverride(platform string) *bool {
+	if c == nil {
+		return nil
+	}
+	return platformBoolOverride(c.FeaturesConfig, featureKeyHideCacheCreation, platform)
 }
 
 // CodexImageGenerationBridgeOverride returns the channel-level override for Codex

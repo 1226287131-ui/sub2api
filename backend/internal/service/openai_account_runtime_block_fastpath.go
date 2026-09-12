@@ -14,7 +14,6 @@ const (
 	openAIOAuth429FallbackCooldown        = 5 * time.Second
 	openAIOAuth429RetryWindow             = 2 * time.Minute
 	openAIOAuth429RetryDelay              = 500 * time.Millisecond
-	openAIOAuth429MaxRetryDelay           = 8 * time.Second
 	openAIOAuth429MaxAccountAttempts      = 3
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
 	openAIOAuth429StormWindow             = 10 * time.Second
@@ -35,6 +34,7 @@ const (
 	openAIOAuth429Quota5h
 	openAIOAuth429Quota7d
 	openAIOAuth429QuotaReset
+	openAIOAuth429RetryAfter
 )
 
 // classifyOpenAIOAuth429 区分账号配额耗尽信号与普通瞬时 429。只有窗口达到
@@ -66,6 +66,10 @@ func classifyOpenAIOAuth429(headers http.Header, responseBody []byte) (openAIOAu
 	if resetUnix := parseOpenAIRateLimitResetTime(responseBody); resetUnix != nil {
 		resetAt := time.Unix(*resetUnix, 0)
 		return openAIOAuth429QuotaReset, &resetAt
+	}
+	now := time.Now()
+	if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil && resetAt.After(now) {
+		return openAIOAuth429RetryAfter, resetAt
 	}
 	return openAIOAuth429Transient, nil
 }
@@ -305,21 +309,16 @@ func (s *OpenAIGatewayService) openAIOAuth429RetryDeadline(account *Account) tim
 	return startedAt.Add(openAIOAuth429RetryWindow)
 }
 
-func openAIOAuth429SameAccountRetryDelay(headers http.Header, deadline time.Time) time.Duration {
+func openAIOAuth429SameAccountRetryDelay(headers http.Header, _ time.Time) time.Duration {
 	delay := openAIOAuth429RetryDelay
 	now := time.Now()
 	if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil && resetAt.After(now) {
-		delay = resetAt.Sub(now)
+		if upstreamDelay := resetAt.Sub(now); upstreamDelay > delay {
+			delay = upstreamDelay
+		}
 	}
-	if delay > openAIOAuth429MaxRetryDelay {
-		delay = openAIOAuth429MaxRetryDelay
-	}
-	if remaining := time.Until(deadline); !deadline.IsZero() && delay > remaining {
-		delay = remaining
-	}
-	if delay < 0 {
-		return 0
-	}
+	// The handler rejects retries that cannot fit their deadline. Never shorten
+	// a provider's minimum delay to make a retry fit our local budget.
 	return delay
 }
 
