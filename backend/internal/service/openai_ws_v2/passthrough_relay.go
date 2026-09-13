@@ -81,12 +81,16 @@ type RelayOptions struct {
 	OnUsageParseFailure             func(eventType string, usageRaw string)
 	OnTurnComplete                  func(turn RelayTurnResult)
 	BeforeWriteClient               func(msgType coderws.MessageType, payload []byte, wroteDownstream bool) error
-	BeforeClientWrite               func(msgType coderws.MessageType, payload []byte)
-	AfterClientWrite                func(msgType coderws.MessageType, payload []byte, writeErr error)
-	BeforeRelayCancel               func(exit RelayExit)
-	ReadClientFrame                 func(ctx context.Context, clientConn FrameConn) (coderws.MessageType, []byte, error)
-	OnTrace                         func(event RelayTraceEvent)
-	Now                             func() time.Time
+	// TransformClientWrite may return a client-visible copy of an upstream
+	// payload after observation/billing hooks have seen the original frame.
+	// It must not mutate the supplied slice in place.
+	TransformClientWrite func(msgType coderws.MessageType, payload []byte) []byte
+	BeforeClientWrite    func(msgType coderws.MessageType, payload []byte)
+	AfterClientWrite     func(msgType coderws.MessageType, payload []byte, writeErr error)
+	BeforeRelayCancel    func(exit RelayExit)
+	ReadClientFrame      func(ctx context.Context, clientConn FrameConn) (coderws.MessageType, []byte, error)
+	OnTrace              func(event RelayTraceEvent)
+	Now                  func() time.Time
 }
 
 type RelayTraceEvent struct {
@@ -291,13 +295,22 @@ func Relay(
 	if !options.StartClientAfterFirstDownstream {
 		startClientReader()
 	}
+	clientWriter := writeClient
+	if options.TransformClientWrite != nil {
+		clientWriter = func(msgType coderws.MessageType, payload []byte) error {
+			if transformed := options.TransformClientWrite(msgType, payload); transformed != nil {
+				payload = transformed
+			}
+			return writeClient(msgType, payload)
+		}
+	}
 	upstreamDone := make(chan struct{})
 	go func() {
 		defer close(upstreamDone)
 		runUpstreamToClient(
 			relayCtx,
 			upstreamConn,
-			writeClient,
+			clientWriter,
 			startAt,
 			nowFn,
 			state,
@@ -636,9 +649,13 @@ func runUpstreamToClient(
 		if beforeClientWrite != nil {
 			beforeClientWrite(msgType, payload)
 		}
-		writeErr := writeClient(msgType, payload)
+		clientPayload := payload
+		// The relay currently receives the client writer as a function, so the
+		// caller wraps it when TransformClientWrite is configured. Keeping this
+		// point after observation ensures billing sees the original payload.
+		writeErr := writeClient(msgType, clientPayload)
 		if afterClientWrite != nil {
-			afterClientWrite(msgType, payload, writeErr)
+			afterClientWrite(msgType, clientPayload, writeErr)
 		}
 		if writeErr != nil {
 			emitRelayTrace(onTrace, RelayTraceEvent{

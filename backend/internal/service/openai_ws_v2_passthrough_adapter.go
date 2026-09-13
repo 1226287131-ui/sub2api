@@ -1257,6 +1257,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					turnLifecycle.beginTerminalWrite()
 				}
 			},
+			TransformClientWrite: func(msgType coderws.MessageType, payload []byte) []byte {
+				if !cacheCreationAsInput || msgType != coderws.MessageText {
+					return payload
+				}
+				return sanitizeCacheCreationJSON(payload)
+			},
 			AfterClientWrite: func(msgType coderws.MessageType, payload []byte, writeErr error) {
 				if msgType == coderws.MessageText && writeErr == nil {
 					eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
