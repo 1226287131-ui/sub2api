@@ -157,7 +157,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	}
-	c.JSON(http.StatusOK, anthropicResp)
+	writeCacheCreationClientJSON(c, http.StatusOK, anthropicResp)
 
 	return &OpenAIForwardResult{
 		RequestID:                   requestID,
@@ -204,7 +204,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 				continue
 			}
 			writeStreamHeaders()
-			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+			if _, err := fmt.Fprint(c.Writer, sanitizeCacheCreationClientSSE(c, sse)); err != nil {
 				clientDisconnected = true
 				break
 			}
@@ -247,7 +247,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 				continue
 			}
 			writeStreamHeaders()
-			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+			if _, err := fmt.Fprint(c.Writer, sanitizeCacheCreationClientSSE(c, sse)); err != nil {
 				clientDisconnected = true
 				break
 			}

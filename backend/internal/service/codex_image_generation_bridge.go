@@ -4,9 +4,9 @@ import "strings"
 
 const featureKeyCodexImageGenerationBridge = "codex_image_generation_bridge"
 
-// featureKeyHideCacheCreation controls whether cache creation usage fields are
-// removed from responses sent to downstream clients. Billing and internal usage
-// observation always use the original upstream values.
+// featureKeyHideCacheCreation folds cache creation into regular input for
+// downstream responses, local usage records, and billing. Raw upstream usage
+// remains available until settlement; historical records are not rewritten.
 const featureKeyHideCacheCreation = "hide_cache_creation"
 
 const (

@@ -19,21 +19,16 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
-	beginUpstreamResponseModelObservation(c)
-	// Resolve the channel-level cache visibility policy for OpenAI responses.
-	// This context flag only sanitizes serialized data sent to the client; usage
-	// observation, billing, and persisted logs continue to see full upstream data.
-	if account != nil && s.channelService != nil && c != nil {
-		if groupID := getOpenAIGroupIDFromContext(c); groupID > 0 {
-			if channel, channelErr := s.channelService.GetChannelForGroup(ctx, groupID); channelErr == nil && channel != nil {
-				if override := channel.HideCacheCreationOverride(account.Platform); override != nil && *override {
-					ctx = withHideCacheCreation(ctx)
-				}
-			} else if channelErr != nil {
-				logger.LegacyPrintf("service.openai_gateway", "failed to resolve cache visibility channel: group_id=%d error=%v", groupID, channelErr)
-			}
-		}
+	ctx, cacheCreationAsInput := withChannelCacheCreationPolicy(ctx, c, s.channelService, getOpenAIGroupIDFromContext(c), account)
+	result, err := s.forwardWithCacheCreationPolicy(ctx, c, account, body)
+	if result != nil && result.CacheCreationAsInput == nil {
+		result.CacheCreationAsInput = &cacheCreationAsInput
 	}
+	return result, err
+}
+
+func (s *OpenAIGatewayService) forwardWithCacheCreationPolicy(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")

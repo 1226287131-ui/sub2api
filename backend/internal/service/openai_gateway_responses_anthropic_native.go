@@ -280,9 +280,9 @@ func (s *OpenAIGatewayService) handleResponsesBufferedFromNativeAnthropic(
 		if err != nil {
 			return nil, fmt.Errorf("restore responses client tools: %w", err)
 		}
-		c.Data(http.StatusOK, "application/json; charset=utf-8", respBytes)
+		c.Data(http.StatusOK, "application/json; charset=utf-8", sanitizeCacheCreationClientJSON(c, respBytes))
 	} else {
-		c.JSON(http.StatusOK, responsesResp)
+		writeCacheCreationClientJSON(c, http.StatusOK, responsesResp)
 	}
 
 	return &OpenAIForwardResult{
@@ -413,6 +413,7 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 			}
 			for _, restored := range payloads {
 				eventType := gjson.GetBytes(restored, "type").String()
+				restored = sanitizeCacheCreationClientJSON(c, restored)
 				if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, restored); err != nil {
 					clientDisconnected = true
 					return
@@ -475,6 +476,7 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 			}
 			for _, restored := range payloads {
 				eventType := gjson.GetBytes(restored, "type").String()
+				restored = sanitizeCacheCreationClientJSON(c, restored)
 				if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, restored); err != nil {
 					clientDisconnected = true
 					break

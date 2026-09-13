@@ -432,6 +432,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if writeClientMessage == nil {
 		return nil, errors.New("client websocket writer is nil")
 	}
+	// Keep the same forwarding-time policy in the turn's asynchronous usage
+	// result; the ingress writer normalizes only the downstream payload copy.
+	cacheCreationAsInput := hideCacheCreationEnabled(ctx)
 	responseModelObserver := &upstreamResponseModelObserver{}
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
@@ -652,6 +655,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	resultWithUsage := func() *OpenAIForwardResult {
 		imageCount := imageCounter.Count()
 		result := &OpenAIForwardResult{
+			CacheCreationAsInput:          &cacheCreationAsInput,
 			RequestID:                     responseID,
 			Usage:                         usage,
 			Model:                         originalModel,

@@ -35,6 +35,25 @@ func (s *GatewayService) ForwardAsResponses(
 	body []byte,
 	parsed *ParsedRequest,
 ) (*ForwardResult, error) {
+	groupID := getOpenAIGroupIDFromContext(c)
+	if parsed != nil && parsed.GroupID != nil {
+		groupID = *parsed.GroupID
+	}
+	ctx, cacheCreationAsInput := withChannelCacheCreationPolicy(ctx, c, s.channelService, groupID, account)
+	result, err := s.forwardAsResponsesWithCacheCreationPolicy(ctx, c, account, body, parsed)
+	if result != nil && result.CacheCreationAsInput == nil {
+		result.CacheCreationAsInput = &cacheCreationAsInput
+	}
+	return result, err
+}
+
+func (s *GatewayService) forwardAsResponsesWithCacheCreationPolicy(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	parsed *ParsedRequest,
+) (*ForwardResult, error) {
 	startTime := time.Now()
 
 	normalizedBody, normalized, err := normalizeOpenAIResponsesLegacyIngress(body)
@@ -461,9 +480,9 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 		if err != nil {
 			return nil, fmt.Errorf("restore responses client tools: %w", err)
 		}
-		c.Data(http.StatusOK, "application/json; charset=utf-8", respBytes)
+		c.Data(http.StatusOK, "application/json; charset=utf-8", sanitizeCacheCreationClientJSON(c, respBytes))
 	} else {
-		c.JSON(http.StatusOK, responsesResp)
+		writeCacheCreationClientJSON(c, http.StatusOK, responsesResp)
 	}
 
 	return &ForwardResult{
@@ -567,6 +586,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 			}
 			for _, restored := range payloads {
 				eventType := gjson.GetBytes(restored, "type").String()
+				restored = sanitizeCacheCreationClientJSON(c, restored)
 				if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, restored); err != nil {
 					logger.L().Info("forward_as_responses stream: client disconnected",
 						zap.String("request_id", requestID),
@@ -589,6 +609,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 					continue
 				}
 				out := string(reverseToolNamesIfPresent(c, []byte(sse)))
+				out = sanitizeCacheCreationClientSSE(c, out)
 				fmt.Fprint(c.Writer, out) //nolint:errcheck
 			}
 			c.Writer.Flush()

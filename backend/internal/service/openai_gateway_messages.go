@@ -33,6 +33,22 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	ctx, cacheCreationAsInput := withChannelCacheCreationPolicy(ctx, c, s.channelService, getOpenAIGroupIDFromContext(c), account)
+	result, err := s.forwardAsAnthropicWithCacheCreationPolicy(ctx, c, account, body, promptCacheKey, defaultMappedModel)
+	if result != nil && result.CacheCreationAsInput == nil {
+		result.CacheCreationAsInput = &cacheCreationAsInput
+	}
+	return result, err
+}
+
+func (s *OpenAIGatewayService) forwardAsAnthropicWithCacheCreationPolicy(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	promptCacheKey string,
+	defaultMappedModel string,
+) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
@@ -646,7 +662,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	}
 	c.Header("Content-Type", "application/json; charset=utf-8")
-	c.JSON(http.StatusOK, anthropicResp)
+	writeCacheCreationClientJSON(c, http.StatusOK, anthropicResp)
 
 	result := &OpenAIForwardResult{
 		RequestID:                     requestID,
@@ -1096,7 +1112,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					continue
 				}
 				writeStreamHeaders()
-				if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+				if _, err := fmt.Fprint(c.Writer, sanitizeCacheCreationClientSSE(c, sse)); err != nil {
 					clientDisconnected = true
 					logger.L().Info("openai messages stream: client disconnected, continuing to drain upstream for billing",
 						zap.String("request_id", requestID),
@@ -1127,7 +1143,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					continue
 				}
 				writeStreamHeaders()
-				if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+				if _, err := fmt.Fprint(c.Writer, sanitizeCacheCreationClientSSE(c, sse)); err != nil {
 					clientDisconnected = true
 					logger.L().Info("openai messages stream: client disconnected during final flush",
 						zap.String("request_id", requestID),

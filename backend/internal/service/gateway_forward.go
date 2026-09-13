@@ -93,29 +93,25 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if parsed == nil {
 		return nil, fmt.Errorf("parse request: empty request")
 	}
+	groupID := int64(0)
+	if parsed.GroupID != nil {
+		groupID = *parsed.GroupID
+	}
+	ctx, cacheCreationAsInput := withChannelCacheCreationPolicy(ctx, c, s.channelService, groupID, account)
 	// Anthropic Fast is requested with speed=fast rather than OpenAI's
 	// service_tier. Attach it at this shared boundary so passthrough, OAuth and
 	// partial-stream results all use the same billing and usage-log path.
 	defer func() {
 		if result != nil {
+			if result.CacheCreationAsInput == nil {
+				result.CacheCreationAsInput = &cacheCreationAsInput
+			}
 			if tier := anthropicSpeedServiceTier(account, parsed.Speed, anthropicSpeedModel(parsed, result)); tier != nil {
 				result.ServiceTier = tier
 			}
 		}
 	}()
 	beginUpstreamResponseModelObservation(c)
-	// Resolve channel visibility once per request. The flag only affects fields
-	// serialized back to the client; upstream observation, billing, and usage
-	// logs continue to receive the complete cache creation values.
-	if account != nil && parsed.GroupID != nil && s.channelService != nil {
-		if channel, channelErr := s.channelService.GetChannelForGroup(ctx, *parsed.GroupID); channelErr == nil && channel != nil {
-			if override := channel.HideCacheCreationOverride(account.Platform); override != nil && *override {
-				ctx = withHideCacheCreation(ctx)
-			}
-		} else if channelErr != nil {
-			slog.Warn("failed to resolve cache visibility channel", "group_id", *parsed.GroupID, "error", channelErr)
-		}
-	}
 
 	// Web Search 模拟：纯 web_search 请求时，直接调用搜索 API 构造响应
 	if account != nil && s.shouldEmulateWebSearch(ctx, account, parsed.GroupID, parsed.Body.Bytes()) {

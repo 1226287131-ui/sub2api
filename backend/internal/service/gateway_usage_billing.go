@@ -714,7 +714,9 @@ func logResponseModelBillingApplied(component string, account *Account, requestI
 
 // recordUsageCore 是 RecordUsage 的核心实现。
 func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsageCoreInput) error {
-	result := input.Result
+	// All billing-only rewrites apply to a copy, never to the upstream snapshot.
+	resultCopy := *input.Result
+	result := &resultCopy
 	apiKey := input.APIKey
 	user := input.User
 	account := input.Account
@@ -729,6 +731,11 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 			result.Usage.InputTokens, account.ID)
 		result.Usage.CacheReadInputTokens += result.Usage.InputTokens
 		result.Usage.InputTokens = 0
+	}
+	// Fold only cache creation into ordinary input. Keep the existing sticky
+	// switch discount on the original input and do not turn creation into reads.
+	if cacheCreationAsInputForBilling(ctx, result.CacheCreationAsInput, s.channelService, apiKey, account) {
+		result.Usage = mergeClaudeCacheCreationIntoInput(result.Usage)
 	}
 
 	// Cache TTL Override: 确保计费时 token 分类与账号设置一致。

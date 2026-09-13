@@ -1566,6 +1566,10 @@ func openAICacheCreationTokensFromUsage(value gjson.Result) int {
 		value.Get("prompt_tokens_details.cache_write_tokens"),
 		value.Get("input_tokens_details.cache_creation_tokens"),
 		value.Get("prompt_tokens_details.cache_creation_tokens"),
+		value.Get("input_tokens_details.cached_creation_tokens"),
+		value.Get("prompt_tokens_details.cached_creation_tokens"),
+		value.Get("input_tokens_details.cached_creation_input_tokens"),
+		value.Get("prompt_tokens_details.cached_creation_input_tokens"),
 	} {
 		if nested.Exists() {
 			return max(int(nested.Int()), 0)
@@ -1577,6 +1581,8 @@ func openAICacheCreationTokensFromUsage(value gjson.Result) int {
 		value.Get("cache_creation_input_tokens"),
 		value.Get("cache_write_input_tokens"),
 		value.Get("cache_creation_tokens"),
+		value.Get("cached_creation_tokens"),
+		value.Get("cached_creation_input_tokens"),
 	)
 }
 

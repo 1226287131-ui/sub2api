@@ -516,18 +516,22 @@ type ResponsesUsage struct {
 func (u *ResponsesUsage) UnmarshalJSON(data []byte) error {
 	type responsesUsageAlias ResponsesUsage
 	type cacheTokenPresence struct {
-		CacheCreationTokens *int `json:"cache_creation_tokens"`
-		CacheWriteTokens    *int `json:"cache_write_tokens"`
+		CacheCreationTokens       *int `json:"cache_creation_tokens"`
+		CacheWriteTokens          *int `json:"cache_write_tokens"`
+		CachedCreationTokens      *int `json:"cached_creation_tokens"`
+		CachedCreationInputTokens *int `json:"cached_creation_input_tokens"`
 	}
 	var aux struct {
 		responsesUsageAlias
-		PromptTokens            int                           `json:"prompt_tokens"`
-		CompletionTokens        int                           `json:"completion_tokens"`
-		CacheCreationTokens     int                           `json:"cache_creation_tokens"`
-		CacheWriteInputTokens   int                           `json:"cache_write_input_tokens"`
-		CacheWriteTokens        int                           `json:"cache_write_tokens"`
-		PromptTokensDetails     *ResponsesInputTokensDetails  `json:"prompt_tokens_details,omitempty"`
-		CompletionTokensDetails *ResponsesOutputTokensDetails `json:"completion_tokens_details,omitempty"`
+		PromptTokens              int                           `json:"prompt_tokens"`
+		CompletionTokens          int                           `json:"completion_tokens"`
+		CacheCreationTokens       int                           `json:"cache_creation_tokens"`
+		CacheWriteInputTokens     int                           `json:"cache_write_input_tokens"`
+		CacheWriteTokens          int                           `json:"cache_write_tokens"`
+		CachedCreationTokens      int                           `json:"cached_creation_tokens"`
+		CachedCreationInputTokens int                           `json:"cached_creation_input_tokens"`
+		PromptTokensDetails       *ResponsesInputTokensDetails  `json:"prompt_tokens_details,omitempty"`
+		CompletionTokensDetails   *ResponsesOutputTokensDetails `json:"completion_tokens_details,omitempty"`
 	}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -554,6 +558,10 @@ func (u *ResponsesUsage) UnmarshalJSON(data []byte) error {
 			u.CacheCreationInputTokens = aux.CacheCreationTokens
 		case aux.CacheWriteTokens > 0:
 			u.CacheCreationInputTokens = aux.CacheWriteTokens
+		case aux.CachedCreationTokens > 0:
+			u.CacheCreationInputTokens = aux.CachedCreationTokens
+		case aux.CachedCreationInputTokens > 0:
+			u.CacheCreationInputTokens = aux.CachedCreationInputTokens
 		}
 	}
 	if u.InputTokensDetails == nil && aux.PromptTokensDetails != nil {
@@ -572,6 +580,14 @@ func (u *ResponsesUsage) UnmarshalJSON(data []byte) error {
 		canonicalCacheCreationTokens = nestedPresence.InputTokensDetails.CacheCreationTokens
 	case nestedPresence.PromptTokensDetails != nil && nestedPresence.PromptTokensDetails.CacheCreationTokens != nil:
 		canonicalCacheCreationTokens = nestedPresence.PromptTokensDetails.CacheCreationTokens
+	case nestedPresence.InputTokensDetails != nil && nestedPresence.InputTokensDetails.CachedCreationTokens != nil:
+		canonicalCacheCreationTokens = nestedPresence.InputTokensDetails.CachedCreationTokens
+	case nestedPresence.PromptTokensDetails != nil && nestedPresence.PromptTokensDetails.CachedCreationTokens != nil:
+		canonicalCacheCreationTokens = nestedPresence.PromptTokensDetails.CachedCreationTokens
+	case nestedPresence.InputTokensDetails != nil && nestedPresence.InputTokensDetails.CachedCreationInputTokens != nil:
+		canonicalCacheCreationTokens = nestedPresence.InputTokensDetails.CachedCreationInputTokens
+	case nestedPresence.PromptTokensDetails != nil && nestedPresence.PromptTokensDetails.CachedCreationInputTokens != nil:
+		canonicalCacheCreationTokens = nestedPresence.PromptTokensDetails.CachedCreationInputTokens
 	}
 	if canonicalCacheCreationTokens != nil {
 		u.CacheCreationInputTokens = max(*canonicalCacheCreationTokens, 0)

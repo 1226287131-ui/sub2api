@@ -159,6 +159,10 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if result == nil {
 		return errors.New("openai usage result is nil")
 	}
+	// Billing normalization must not mutate the upstream usage snapshot: the
+	// same result may still be inspected or retried by the billing worker.
+	resultCopy := *result
+	result = &resultCopy
 	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI {
 		s.rateLimitService.ResetOpenAI403Counter(ctx, input.Account.ID)
 	}
@@ -167,6 +171,11 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	user := input.User
 	account := input.Account
 	subscription := input.Subscription
+	if cacheCreationAsInputForBilling(ctx, result.CacheCreationAsInput, s.channelService, apiKey, account) {
+		// OpenAI input_tokens already includes cache creation. Clearing its
+		// separate bucket folds it into ordinary input without adding tokens.
+		result.Usage.CacheCreationInputTokens = 0
+	}
 	billingAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
 		return err
