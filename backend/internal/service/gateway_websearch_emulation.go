@@ -185,23 +185,35 @@ func (s *GatewayService) handleWebSearchEmulation(
 }
 
 func doWebSearch(ctx context.Context, account *Account, query string) (*websearch.SearchResponse, string, error) {
-	proxyURL := resolveAccountProxyURL(account)
+	proxyURL := account.NextProxyLaneURL()
+	plainProxyURL, _, _, timeoutSeconds, releaseLane, err := AcquireAccountProxyLaneForURL(account.ID, proxyURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("web search proxy lane: %w", err)
+	}
+	success := false
+	defer func() { releaseLane(success) }()
+	if timeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+		defer cancel()
+	}
 	mgr := getWebSearchManager()
 	if mgr == nil {
 		return nil, "", fmt.Errorf("web search emulation: manager not initialized")
 	}
 	resp, providerName, err := mgr.SearchWithBestProvider(ctx, websearch.SearchRequest{
-		Query: query, MaxResults: webSearchDefaultMaxResults, ProxyURL: proxyURL,
+		Query: query, MaxResults: webSearchDefaultMaxResults, ProxyURL: plainProxyURL,
 	})
 	if err != nil {
 		slog.Error("web search emulation: search failed", "error", err)
 		return nil, "", fmt.Errorf("web search emulation: %w", err)
 	}
+	success = true
 	return resp, providerName, nil
 }
 
 func resolveAccountProxyURL(account *Account) string {
-	if account.ProxyID != nil && account.Proxy != nil {
+	if account != nil && account.ProxyID != nil && account.Proxy != nil {
 		return account.Proxy.URL()
 	}
 	return ""

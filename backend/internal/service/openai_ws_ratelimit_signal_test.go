@@ -553,29 +553,39 @@ func TestOpenAIWSErrorHTTPStatusFromRaw_UsageLimitReachedIs429(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, openAIWSErrorHTTPStatusFromRaw("rate_limit_exceeded", ""))
 }
 
-func TestOpenAIWSRateLimitFailoverError_OAuthKeepsSameAccountDeadline(t *testing.T) {
-	svc := &OpenAIGatewayService{}
-	headers := http.Header{"Retry-After": []string{"30"}}
-	body := []byte(`{"error":{"type":"rate_limit_error","message":"limited"}}`)
+func TestOpenAIWSRateLimitFailoverError_RetryPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		accountType string
+		retryAfter  string
+		wantRetry   bool
+	}{
+		{name: "oauth_transient", accountType: AccountTypeOAuth, wantRetry: true},
+		{name: "oauth_explicit_cooldown", accountType: AccountTypeOAuth, retryAfter: "30"},
+		{name: "api_key_explicit_cooldown", accountType: AccountTypeAPIKey, retryAfter: "30"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &OpenAIGatewayService{}
+			headers := http.Header{}
+			if tc.retryAfter != "" {
+				headers.Set("Retry-After", tc.retryAfter)
+			}
+			body := []byte(`{"error":{"type":"rate_limit_error","message":"limited"}}`)
+			startedAt := time.Now()
+			failoverErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
+				ID: 904, Platform: PlatformOpenAI, Type: tc.accountType,
+			}, headers, body, "limited")
 
-	oauthErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
-		ID:       904,
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
-	}, headers, body, "limited")
-	require.True(t, oauthErr.RetryableOnSameAccount)
-	require.False(t, oauthErr.SameAccountRetryDeadline.IsZero())
-	require.Positive(t, oauthErr.SameAccountRetryDelay)
-	require.GreaterOrEqual(t, oauthErr.SameAccountRetryDelay, 30*time.Second, "must not shorten the upstream Retry-After")
-	require.Equal(t, body, oauthErr.ResponseBody)
-	require.Equal(t, "30", oauthErr.ResponseHeaders.Get("Retry-After"))
-
-	apiKeyErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
-		ID:       905,
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeAPIKey,
-	}, headers, body, "limited")
-	require.False(t, apiKeyErr.RetryableOnSameAccount)
-	require.True(t, apiKeyErr.SameAccountRetryDeadline.IsZero())
-	require.Zero(t, apiKeyErr.SameAccountRetryDelay)
+			require.Equal(t, tc.wantRetry, failoverErr.RetryableOnSameAccount)
+			if tc.wantRetry {
+				require.WithinDuration(t, startedAt.Add(openAIOAuth429RetryWindow), failoverErr.SameAccountRetryDeadline, time.Second)
+				require.Equal(t, openAIOAuth429RetryDelay, failoverErr.SameAccountRetryDelay)
+			} else {
+				require.True(t, failoverErr.SameAccountRetryDeadline.IsZero())
+				require.Zero(t, failoverErr.SameAccountRetryDelay)
+			}
+			require.Equal(t, body, failoverErr.ResponseBody)
+			require.Equal(t, tc.retryAfter, failoverErr.ResponseHeaders.Get("Retry-After"))
+		})
+	}
 }

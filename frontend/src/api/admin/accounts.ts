@@ -20,6 +20,8 @@ import type {
   CodexSessionImportRequest,
   CodexSessionImportResult,
   OpenAICodexPATCreateRequest,
+  SmartProxyAssignmentOptions,
+  SmartProxyAssignmentResult,
   CheckMixedChannelRequest,
   CheckMixedChannelResponse,
   UpstreamBillingProbeResult,
@@ -28,7 +30,8 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState
+  GrokMediaEligibilityState,
+  ProxyLaneStatus
 } from '@/types'
 
 /**
@@ -175,6 +178,19 @@ export async function getById(id: number): Promise<Account> {
   return data
 }
 
+export interface ProxyLaneRuntimeItem {
+  effective_concurrency: number
+  lanes: ProxyLaneStatus[]
+}
+
+export async function getProxyLaneRuntime(accountIds: number[]): Promise<Record<string, ProxyLaneRuntimeItem>> {
+  const { data } = await apiClient.post<{ items: Record<string, ProxyLaneRuntimeItem> }>(
+    '/admin/accounts/proxy-lanes/runtime',
+    { account_ids: accountIds }
+  )
+  return data.items || {}
+}
+
 /**
  * Create new account
  * @param accountData - Account data
@@ -237,6 +253,14 @@ export async function duplicate(id: number): Promise<Account> {
  */
 export async function update(id: number, updates: UpdateAccountRequest): Promise<Account> {
   const { data } = await apiClient.put<Account>(`/admin/accounts/${id}`, updates)
+  return data
+}
+
+export async function probeCodexTicket(id: number, model: string): Promise<{ model: string; tickets: NonNullable<Account['codex_turn_tickets']> }> {
+  const { data } = await apiClient.post<{ model: string; tickets: NonNullable<Account['codex_turn_tickets']> }>(
+    `/admin/accounts/${id}/codex-ticket/probe`,
+    { model }
+  )
   return data
 }
 
@@ -311,9 +335,13 @@ export async function testAccount(id: number): Promise<{
  * @param id - Account ID
  * @returns Updated account
  */
-export async function refreshCredentials(id: number): Promise<Account> {
-  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/refresh`)
-  return data
+export type RefreshCredentialsResult =
+  | { account: Account; message: string; warning: 'missing_project_id_temporary' }
+  | { account: Account; message?: never; warning?: never }
+
+export async function refreshCredentials(id: number): Promise<RefreshCredentialsResult> {
+  const { data } = await apiClient.post<Account | RefreshCredentialsResult>(`/admin/accounts/${id}/refresh`)
+  return 'account' in data ? data : { account: data }
 }
 
 /**
@@ -620,6 +648,7 @@ export interface UpstreamModelMetadata {
   supported_reasoning_levels?: string[]
   input_modalities?: string[]
   context_window?: number
+  max_context_window?: number
   max_output_tokens?: number
 }
 
@@ -748,11 +777,27 @@ export async function exportData(options?: {
 export async function importData(payload: {
   data: AdminDataPayload
   skip_default_group_bind?: boolean
+  post_import_updates?: Record<string, unknown>
+  smart_proxy_assignment?: SmartProxyAssignmentOptions
 }): Promise<AdminDataImportResult> {
   const { data } = await apiClient.post<AdminDataImportResult>('/admin/accounts/data', {
     data: payload.data,
-    skip_default_group_bind: payload.skip_default_group_bind
-  })
+    skip_default_group_bind: payload.skip_default_group_bind,
+    post_import_updates: payload.post_import_updates,
+    smart_proxy_assignment: payload.smart_proxy_assignment
+  }, payload.smart_proxy_assignment?.enabled ? { timeout: 300000 } : undefined)
+  return data
+}
+
+export async function smartAssignProxies(
+  accountIds: number[],
+  options: SmartProxyAssignmentOptions
+): Promise<SmartProxyAssignmentResult> {
+  const { data } = await apiClient.post<SmartProxyAssignmentResult>(
+    '/admin/accounts/smart-assign-proxies',
+    { account_ids: accountIds, options },
+    { timeout: 300000 }
+  )
   return data
 }
 
@@ -1069,11 +1114,13 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
 export const accountsAPI = {
   list,
   listWithEtag,
+  getProxyLaneRuntime,
   getUpstreamBillingRatesWithEtag,
   getById,
   create,
   duplicate,
   update,
+  probeCodexTicket,
   getGrokMediaEligibility,
   updateGrokMediaEligibility,
   checkMixedChannelRisk,
@@ -1107,6 +1154,7 @@ export const accountsAPI = {
   syncFromCrs,
   exportData,
   importData,
+  smartAssignProxies,
   importCodexSession,
   createOpenAICodexPAT,
   getAntigravityDefaultModelMapping,

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, smartAssignProxiesMock, getByIdMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
+  smartAssignProxiesMock: vi.fn(),
+  getByIdMock: vi.fn(),
   authIsSimpleMode: { value: true }
 }))
 
@@ -28,7 +30,9 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       update: updateAccountMock,
-      checkMixedChannelRisk: checkMixedChannelRiskMock
+      checkMixedChannelRisk: checkMixedChannelRiskMock,
+      smartAssignProxies: smartAssignProxiesMock,
+      getById: getByIdMock
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -326,9 +330,36 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 describe('EditAccountModal', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
+    smartAssignProxiesMock.mockReset()
+    getByIdMock.mockReset()
   })
 
   afterEach(() => vi.useRealTimers())
+
+  it('账号编辑菜单可一键随机配置主代理和并发代理池', async () => {
+    const account = buildAccount()
+    smartAssignProxiesMock.mockResolvedValue({
+      success: 1,
+      failed: 0,
+      tested_proxies: 3,
+      available_proxies: 3,
+      items: [{ account_id: 1, success: true, primary_proxy_id: 8, proxy_pool_ids: [9, 10] }]
+    })
+    getByIdMock.mockResolvedValue({ ...account, proxy_id: 8, proxy_pool_ids: [9, 10] })
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="smart-proxy-count"]').setValue(3)
+    await wrapper.get('[data-testid="smart-proxy-apply"]').trigger('click')
+    await flushPromises()
+
+    expect(smartAssignProxiesMock).toHaveBeenCalledWith([1], expect.objectContaining({
+      proxy_count: 3,
+      test_latency: true,
+      prefer_low_latency: true,
+      weighted_by_load: true
+    }))
+    expect(getByIdMock).toHaveBeenCalledWith(1)
+    expect(wrapper.emitted('updated')?.[0]?.[0]).toMatchObject({ proxy_id: 8, proxy_pool_ids: [9, 10] })
+  })
 
   it('sets expiry presets from now instead of extending the saved expiry', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
@@ -442,6 +473,80 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
       'gpt-5.2': 'gpt-5.2'
+    })
+  })
+
+  it('preserves OpenCode Zen account type and endpoints on submit', async () => {
+    const account = buildAccount()
+    account.platform = 'opencode_go'
+    account.credentials = {
+      api_key: 'sk-opencode',
+      account_mode: 'zen',
+      api_protocol: 'adaptive',
+      base_url: 'https://opencode.ai/zen/v1',
+      api_base_urls: {
+        chat_completions: 'https://opencode.ai/zen/v1',
+        anthropic: 'https://opencode.ai/zen',
+        responses: 'https://opencode.ai/zen/v1'
+      },
+      protocol_rules: [
+        { pattern: 'grok-*', protocol: 'responses' },
+        { pattern: 'gpt-*', protocol: 'responses' },
+        { pattern: 'muse-spark-*', protocol: 'responses' },
+        { pattern: 'claude-*', protocol: 'anthropic' },
+        { pattern: 'qwen*', protocol: 'anthropic' }
+      ]
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toMatchObject({
+      account_mode: 'zen',
+      api_protocol: 'adaptive',
+      base_url: 'https://opencode.ai/zen/v1',
+      api_base_urls: {
+        chat_completions: 'https://opencode.ai/zen/v1',
+        anthropic: 'https://opencode.ai/zen',
+        responses: 'https://opencode.ai/zen/v1'
+      },
+      protocol_rules: [
+        { pattern: 'grok-*', protocol: 'responses' },
+        { pattern: 'gpt-*', protocol: 'responses' },
+        { pattern: 'muse-spark-*', protocol: 'responses' },
+        { pattern: 'claude-*', protocol: 'anthropic' },
+        { pattern: 'qwen*', protocol: 'anthropic' }
+      ]
+    })
+  })
+
+  it('treats a legacy OpenCode account without account_mode as GO', async () => {
+    const account = buildAccount()
+    account.platform = 'opencode_go'
+    account.credentials = {
+      api_key: 'sk-opencode',
+      api_protocol: 'adaptive',
+      base_url: 'https://opencode.ai/zen/go/v1',
+      api_base_urls: {
+        chat_completions: 'https://opencode.ai/zen/go/v1',
+        anthropic: 'https://opencode.ai/zen/go',
+        responses: 'https://opencode.ai/zen/go/v1'
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toMatchObject({
+      account_mode: 'go',
+      api_protocol: 'adaptive',
+      base_url: 'https://opencode.ai/zen/go/v1'
     })
   })
 
@@ -1236,6 +1341,19 @@ describe('EditAccountModal', () => {
 	  expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.auto_pause_5h_disabled).toBe(true)
 	  expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.auto_pause_7d_disabled).toBeUndefined()
 	})
+
+  it('preserves Seedance when exactly two endpoint capabilities are selected', async () => {
+    const account = buildAccount()
+    account.credentials.openai_capabilities = ['chat_completions', 'seedance']
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="openai-endpoint-capability-seedance"]').element.checked).toBe(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.openai_capabilities).toEqual(['chat_completions', 'seedance'])
+  })
 
   it('keeps at least one OpenAI APIKey endpoint capability selected', async () => {
     const account = buildAccount()

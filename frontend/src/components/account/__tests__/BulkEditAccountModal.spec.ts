@@ -23,7 +23,9 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       bulkUpdate: vi.fn(),
-      checkMixedChannelRisk: vi.fn()
+      checkMixedChannelRisk: vi.fn(),
+      smartAssignProxies: vi.fn(),
+      list: vi.fn()
     }
   }
 }))
@@ -84,6 +86,13 @@ describe('BulkEditAccountModal', () => {
   beforeEach(() => {
     vi.mocked(adminAPI.accounts.bulkUpdate).mockReset()
     vi.mocked(adminAPI.accounts.checkMixedChannelRisk).mockReset()
+    vi.mocked(adminAPI.accounts.smartAssignProxies).mockReset().mockResolvedValue({
+      success: 2,
+      failed: 0,
+      tested_proxies: 3,
+      available_proxies: 3,
+      items: []
+    } as any)
     showError.mockReset()
     showSuccess.mockReset()
     translate.mockClear()
@@ -107,6 +116,22 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.get('[data-testid="bulk-rate-sync-warning"]').text()).toContain(
       'admin.accounts.bulkEdit.rateSyncWarning'
     )
+  })
+
+  it('一键智能代理分配使用当前选中账号和策略配置', async () => {
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="smart-proxy-count"]').setValue(3)
+    await wrapper.get('[data-testid="smart-proxy-apply"]').trigger('click')
+    await flushPromises()
+
+    expect(adminAPI.accounts.smartAssignProxies).toHaveBeenCalledWith([1, 2], {
+      proxy_count: 3,
+      test_latency: true,
+      prefer_low_latency: true,
+      low_latency_limit: 0,
+      weighted_by_load: true
+    })
+    expect(wrapper.emitted('updated')).toHaveLength(1)
   })
 
   it('后端拒绝修改同步账号倍率时展示专用错误', async () => {
@@ -554,6 +579,18 @@ describe('BulkEditAccountModal', () => {
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
       credentials: { openai_capabilities: ['embeddings'] },
       extra: { openai_responses_mode: null }
+    })
+  })
+
+  it('persists Seedance in a two-capability bulk update', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['apikey'] })
+    await wrapper.get('#bulk-edit-openai-endpoint-capabilities-enabled').setValue(true)
+    await wrapper.get('[data-testid="bulk-edit-openai-endpoint-capability-embeddings"]').setValue(false)
+    await wrapper.get('[data-testid="bulk-edit-openai-endpoint-capability-seedance"]').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      credentials: { openai_capabilities: ['chat_completions', 'seedance'] }
     })
   })
 

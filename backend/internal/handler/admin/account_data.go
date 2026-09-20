@@ -50,6 +50,17 @@ type DataProxy struct {
 	ExpiryWarnDays  int    `json:"expiry_warn_days,omitempty"`
 }
 
+type DataProxyLaneConfig struct {
+	ProxyKey               string `json:"proxy_key"`
+	Enabled                bool   `json:"enabled"`
+	MaxConcurrency         int    `json:"max_concurrency"`
+	Weight                 int    `json:"weight"`
+	TimeoutSeconds         int    `json:"timeout_seconds"`
+	ErrorCircuitThreshold  int    `json:"error_circuit_threshold"`
+	CircuitCooldownSeconds int    `json:"circuit_cooldown_seconds"`
+	FallbackOrder          int    `json:"fallback_order"`
+}
+
 // DataAccount 是管理员显式备份导出使用的账号结构，故意不走 dto.Account 的脱敏路径，
 // Credentials 原文返回。这是"管理员备份"这一显式行为的一部分；如未来需要导出脱敏版本，
 // 应新增独立结构而非修改这里。
@@ -58,32 +69,41 @@ type DataProxy struct {
 // 影子的独立调度配置(priority/并发/分组/status 管理员可单独调)亦不在本备份范围,属已知局限
 // (外审第6轮裁决:保持排除 + 前端警告,而非升级格式做完整往返)。
 type DataAccount struct {
-	Name               string         `json:"name"`
-	Notes              *string        `json:"notes,omitempty"`
-	Platform           string         `json:"platform"`
-	Type               string         `json:"type"`
-	Credentials        map[string]any `json:"credentials"`
-	Extra              map[string]any `json:"extra,omitempty"`
-	ProxyKey           *string        `json:"proxy_key,omitempty"`
-	Concurrency        int            `json:"concurrency"`
-	Priority           int            `json:"priority"`
-	RateMultiplier     *float64       `json:"rate_multiplier,omitempty"`
-	ExpiresAt          *int64         `json:"expires_at,omitempty"`
-	AutoPauseOnExpired *bool          `json:"auto_pause_on_expired,omitempty"`
+	Name               string                `json:"name"`
+	Notes              *string               `json:"notes,omitempty"`
+	Platform           string                `json:"platform"`
+	Type               string                `json:"type"`
+	Credentials        map[string]any        `json:"credentials"`
+	Extra              map[string]any        `json:"extra,omitempty"`
+	ProxyKey           *string               `json:"proxy_key,omitempty"`
+	ProxyPoolKeys      []string              `json:"proxy_pool_keys,omitempty"`
+	ProxyLaneConfigs   []DataProxyLaneConfig `json:"proxy_lane_configs,omitempty"`
+	ProxyLaneStrategy  string                `json:"proxy_lane_strategy,omitempty"`
+	Concurrency        int                   `json:"concurrency"`
+	Priority           int                   `json:"priority"`
+	RateMultiplier     *float64              `json:"rate_multiplier,omitempty"`
+	ExpiresAt          *int64                `json:"expires_at,omitempty"`
+	AutoPauseOnExpired *bool                 `json:"auto_pause_on_expired,omitempty"`
 }
 
 type DataImportRequest struct {
-	Data                 DataPayload `json:"data"`
-	SkipDefaultGroupBind *bool       `json:"skip_default_group_bind"`
+	Data                 DataPayload                  `json:"data"`
+	SkipDefaultGroupBind *bool                        `json:"skip_default_group_bind"`
+	PostImportUpdates    *BulkUpdateAccountsRequest   `json:"post_import_updates,omitempty"`
+	SmartProxyAssignment *SmartProxyAssignmentOptions `json:"smart_proxy_assignment,omitempty"`
 }
 
 type DataImportResult struct {
-	ProxyCreated   int               `json:"proxy_created"`
-	ProxyReused    int               `json:"proxy_reused"`
-	ProxyFailed    int               `json:"proxy_failed"`
-	AccountCreated int               `json:"account_created"`
-	AccountFailed  int               `json:"account_failed"`
-	Errors         []DataImportError `json:"errors,omitempty"`
+	ProxyCreated      int               `json:"proxy_created"`
+	ProxyReused       int               `json:"proxy_reused"`
+	ProxyFailed       int               `json:"proxy_failed"`
+	AccountCreated    int               `json:"account_created"`
+	AccountFailed     int               `json:"account_failed"`
+	ProxyAssigned     int               `json:"proxy_assigned,omitempty"`
+	ProxyAssignFailed int               `json:"proxy_assign_failed,omitempty"`
+	PostImportUpdated int               `json:"post_import_updated,omitempty"`
+	PostImportFailed  int               `json:"post_import_failed,omitempty"`
+	Errors            []DataImportError `json:"errors,omitempty"`
 }
 
 type DataImportError struct {
@@ -194,19 +214,46 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 				proxyKey = &key
 			}
 		}
+		proxyPoolKeys := make([]string, 0)
+		for _, proxyID := range service.AccountProxyPoolIDs(acc.Extra) {
+			if key, ok := proxyKeyByID[proxyID]; ok {
+				proxyPoolKeys = append(proxyPoolKeys, key)
+			}
+		}
+		proxyLaneConfigs := make([]DataProxyLaneConfig, 0)
+		for _, lane := range acc.ProxyLaneConfigs() {
+			key, ok := proxyKeyByID[lane.ProxyID]
+			if !ok {
+				continue
+			}
+			proxyLaneConfigs = append(proxyLaneConfigs, DataProxyLaneConfig{
+				ProxyKey: key, Enabled: lane.Enabled, MaxConcurrency: lane.MaxConcurrency,
+				Weight: lane.Weight, TimeoutSeconds: lane.TimeoutSeconds,
+				ErrorCircuitThreshold:  lane.ErrorCircuitThreshold,
+				CircuitCooldownSeconds: lane.CircuitCooldownSeconds,
+				FallbackOrder:          lane.FallbackOrder,
+			})
+		}
 		var expiresAt *int64
 		if acc.ExpiresAt != nil {
 			v := acc.ExpiresAt.Unix()
 			expiresAt = &v
 		}
+		exportExtra := service.RedactOpenAICodexTicketExtra(acc.Extra)
+		delete(exportExtra, service.AccountProxyPoolIDsExtraKey)
+		delete(exportExtra, service.AccountProxyLaneConfigsExtraKey)
+		delete(exportExtra, service.AccountProxyLaneStrategyExtraKey)
 		dataAccounts = append(dataAccounts, DataAccount{
 			Name:               acc.Name,
 			Notes:              acc.Notes,
 			Platform:           acc.Platform,
 			Type:               acc.Type,
 			Credentials:        acc.Credentials,
-			Extra:              acc.Extra,
+			Extra:              exportExtra,
 			ProxyKey:           proxyKey,
+			ProxyPoolKeys:      proxyPoolKeys,
+			ProxyLaneConfigs:   proxyLaneConfigs,
+			ProxyLaneStrategy:  service.ProxyLaneStrategy(acc.Extra),
 			Concurrency:        acc.Concurrency,
 			Priority:           acc.Priority,
 			RateMultiplier:     acc.RateMultiplier,
@@ -318,8 +365,8 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 						Protocol:       proxy.Protocol,
 						Host:           proxy.Host,
 						Port:           proxy.Port,
-						Username:       proxy.Username,
-						Password:       proxy.Password,
+						Username:       &proxy.Username,
+						Password:       &proxy.Password,
 					})
 				}
 			}
@@ -394,14 +441,15 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 				Protocol:       created.Protocol,
 				Host:           created.Host,
 				Port:           created.Port,
-				Username:       created.Username,
-				Password:       created.Password,
+				Username:       &created.Username,
+				Password:       &created.Password,
 			})
 		}
 	}
 
 	// 收集需要异步设置隐私的 Antigravity OAuth 账号
 	var privacyAccounts []*service.Account
+	createdAccountIDs := make([]int64, 0, len(dataPayload.Accounts))
 
 	for i := range dataPayload.Accounts {
 		item := dataPayload.Accounts[i]
@@ -430,6 +478,45 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 				continue
 			}
 		}
+		proxyPoolIDs := make([]int64, 0, len(item.ProxyPoolKeys))
+		for _, key := range item.ProxyPoolKeys {
+			id, ok := proxyKeyToID[key]
+			if !ok {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: item.Name, ProxyKey: key, Message: "proxy_pool_key not found",
+				})
+				proxyPoolIDs = nil
+				break
+			}
+			proxyPoolIDs = append(proxyPoolIDs, id)
+		}
+		if len(item.ProxyPoolKeys) > 0 && proxyPoolIDs == nil {
+			continue
+		}
+		proxyLaneConfigs := make([]service.ProxyLaneConfig, 0, len(item.ProxyLaneConfigs))
+		laneConfigInvalid := false
+		for _, lane := range item.ProxyLaneConfigs {
+			proxyID, ok := proxyKeyToID[lane.ProxyKey]
+			if !ok {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: item.Name, ProxyKey: lane.ProxyKey, Message: "proxy lane key not found",
+				})
+				laneConfigInvalid = true
+				break
+			}
+			proxyLaneConfigs = append(proxyLaneConfigs, service.ProxyLaneConfig{
+				ProxyID: proxyID, Enabled: lane.Enabled, MaxConcurrency: lane.MaxConcurrency,
+				Weight: lane.Weight, TimeoutSeconds: lane.TimeoutSeconds,
+				ErrorCircuitThreshold:  lane.ErrorCircuitThreshold,
+				CircuitCooldownSeconds: lane.CircuitCooldownSeconds,
+				FallbackOrder:          lane.FallbackOrder,
+			})
+		}
+		if laneConfigInvalid {
+			continue
+		}
 
 		enrichCredentialsFromIDToken(&item)
 
@@ -441,6 +528,9 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			Credentials:          item.Credentials,
 			Extra:                item.Extra,
 			ProxyID:              proxyID,
+			ProxyPoolIDs:         proxyPoolIDs,
+			ProxyLaneConfigs:     proxyLaneConfigs,
+			ProxyLaneStrategy:    item.ProxyLaneStrategy,
 			Concurrency:          item.Concurrency,
 			Priority:             item.Priority,
 			RateMultiplier:       item.RateMultiplier,
@@ -465,7 +555,70 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			privacyAccounts = append(privacyAccounts, created)
 		}
 		h.scheduleGrokImportProbe(created)
+		createdAccountIDs = append(createdAccountIDs, created.ID)
 		result.AccountCreated++
+	}
+
+	if req.PostImportUpdates != nil && len(createdAccountIDs) > 0 && hasBulkUpdateAccountFields(req.PostImportUpdates) {
+		postUpdates := *req.PostImportUpdates
+		// Security/correctness invariant: post-import edits can only target accounts
+		// created by this import invocation. Ignore caller-supplied IDs/filters.
+		postUpdates.AccountIDs = append([]int64(nil), createdAccountIDs...)
+		postUpdates.Filters = nil
+		if postUpdates.RateMultiplier != nil && *postUpdates.RateMultiplier < 0 {
+			result.PostImportFailed = len(createdAccountIDs)
+			result.Errors = append(result.Errors, DataImportError{
+				Kind: "account", Name: "post_import_updates", Message: "rate_multiplier must be >= 0",
+			})
+		} else {
+			sanitizeExtraBaseRPM(postUpdates.Extra)
+			if validateErr := service.ValidateUpstreamRequestIDHeaderExtra(postUpdates.Extra); validateErr != nil {
+				result.PostImportFailed = len(createdAccountIDs)
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: "post_import_updates", Message: validateErr.Error(),
+				})
+			} else {
+				updated, updateErr := h.adminService.BulkUpdateAccounts(ctx, toServiceBulkUpdateAccountsInput(&postUpdates))
+				if updateErr != nil {
+					result.PostImportFailed = len(createdAccountIDs)
+					result.Errors = append(result.Errors, DataImportError{
+						Kind: "account", Name: "post_import_updates", Message: updateErr.Error(),
+					})
+				} else {
+					result.PostImportUpdated = updated.Success
+					result.PostImportFailed = updated.Failed
+					for _, item := range updated.Results {
+						if item.Success {
+							continue
+						}
+						result.Errors = append(result.Errors, DataImportError{
+							Kind: "account", Name: fmt.Sprintf("account:%d", item.AccountID), Message: item.Error,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	if req.SmartProxyAssignment != nil && req.SmartProxyAssignment.Enabled && len(createdAccountIDs) > 0 {
+		assignment, assignErr := h.smartAssignAccountProxies(ctx, createdAccountIDs, *req.SmartProxyAssignment, nil)
+		if assignErr != nil {
+			result.ProxyAssignFailed = len(createdAccountIDs)
+			result.Errors = append(result.Errors, DataImportError{
+				Kind: "account", Name: "smart_proxy_assignment", Message: assignErr.Error(),
+			})
+		} else {
+			result.ProxyAssigned = assignment.Success
+			result.ProxyAssignFailed = assignment.Failed
+			for _, item := range assignment.Items {
+				if item.Success {
+					continue
+				}
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: fmt.Sprintf("account:%d", item.AccountID), Message: item.Error,
+				})
+			}
+		}
 	}
 
 	// 异步设置 Antigravity 隐私，避免大量导入时阻塞请求
@@ -575,18 +728,20 @@ func (h *AccountHandler) resolveExportProxies(ctx context.Context, accounts []se
 	seen := make(map[int64]struct{})
 	ids := make([]int64, 0)
 	for i := range accounts {
-		if accounts[i].ProxyID == nil {
-			continue
+		accountProxyIDs := service.AccountProxyPoolIDs(accounts[i].Extra)
+		if accounts[i].ProxyID != nil {
+			accountProxyIDs = append([]int64{*accounts[i].ProxyID}, accountProxyIDs...)
 		}
-		id := *accounts[i].ProxyID
-		if id <= 0 {
-			continue
+		for _, id := range accountProxyIDs {
+			if id <= 0 {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
 		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
 		return []service.Proxy{}, nil

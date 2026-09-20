@@ -306,6 +306,9 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		Credentials:           credentials,
 		Extra:                 extra,
 		ProxyID:               cloneAccountValuePointer(proxyID),
+		ProxyPoolIDs:          AccountProxyPoolIDs(source.Extra),
+		ProxyLaneConfigs:      source.ProxyLaneConfigs(),
+		ProxyLaneStrategy:     ProxyLaneStrategy(source.Extra),
 		Concurrency:           source.Concurrency,
 		Priority:              source.Priority,
 		RateMultiplier:        cloneAccountValuePointer(source.RateMultiplier),
@@ -321,6 +324,9 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		return nil, fmt.Errorf("normalize duplicate account extra: %w", err)
 	}
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
+	if err := NormalizeOpenCodeGoProtocolRulesCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
 	duplicate, err := buildAccountForCreate(input, accountExtra)
@@ -407,7 +413,50 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
+func (s *adminServiceImpl) validateAccountProxyPool(ctx context.Context, ids []int64, primaryProxyID *int64) ([]int64, error) {
+	seen := make(map[int64]struct{}, len(ids))
+	normalized := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || (primaryProxyID != nil && id == *primaryProxyID) {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	if len(normalized) == 0 {
+		return []int64{}, nil
+	}
+	proxies, err := s.proxyRepo.ListByIDs(ctx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]Proxy, len(proxies))
+	for _, proxy := range proxies {
+		byID[proxy.ID] = proxy
+	}
+	now := time.Now()
+	for _, id := range normalized {
+		proxy, ok := byID[id]
+		if !ok {
+			return nil, infraerrors.BadRequest("ACCOUNT_PROXY_POOL_INVALID", fmt.Sprintf("proxy %d does not exist", id))
+		}
+		if !proxy.IsActive() || proxy.IsExpired(now) {
+			return nil, infraerrors.BadRequest("ACCOUNT_PROXY_POOL_UNAVAILABLE", fmt.Sprintf("proxy %d is not active", id))
+		}
+	}
+	return normalized, nil
+}
+
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
+	accountExtra = MergeOpenAICodexTicketExtra(accountExtra, nil)
+	var err error
+	accountExtra, err = NormalizeOpenAICodexTicketPolicyExtra(input.Platform, input.Type, accountExtra)
+	if err != nil {
+		return nil, err
+	}
 	// Probe/session state is system-managed. New accounts always start with automatic refresh disabled.
 	delete(accountExtra, UpstreamBillingProbeEnabledExtraKey)
 	delete(accountExtra, UpstreamBillingRateSyncEnabledExtraKey)
@@ -486,6 +535,22 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	delete(accountExtra, AccountProxyPoolIDsExtraKey)
+	delete(accountExtra, AccountProxyLaneConfigsExtraKey)
+	delete(accountExtra, AccountProxyLaneStrategyExtraKey)
+	proxyPoolIDs, err := s.validateAccountProxyPool(ctx, input.ProxyPoolIDs, input.ProxyID)
+	if err != nil {
+		return nil, err
+	}
+	accountExtra = NormalizeAccountProxyPoolExtra(accountExtra, input.ProxyID)
+	accountExtra[AccountProxyPoolIDsExtraKey] = proxyPoolIDs
+	if len(input.ProxyLaneConfigs) > 0 {
+		accountExtra[AccountProxyLaneConfigsExtraKey] = append([]ProxyLaneConfig(nil), input.ProxyLaneConfigs...)
+	}
+	if input.ProxyLaneStrategy != "" {
+		accountExtra[AccountProxyLaneStrategyExtraKey] = input.ProxyLaneStrategy
+	}
+	accountExtra = NormalizeAccountProxyLaneExtra(accountExtra, input.ProxyID, input.Concurrency)
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -512,6 +577,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 
 	// 校验并规范化请求头覆写配置（header 名小写化、格式检查）
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
+	if err := NormalizeOpenCodeGoProtocolRulesCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
 	// Never persist ephemeral SSO/password secrets after OAuth conversion.
@@ -582,6 +650,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if input.Type != "" {
 			effectiveType = input.Type
 		}
+		normalizedExtra, err = NormalizeOpenAICodexTicketPolicyExtra(account.Platform, effectiveType, normalizedExtra)
+		if err != nil {
+			return nil, err
+		}
 		normalizedExtra, err = normalizeOpenAIAutoResetCreditExtra(account.Platform, effectiveType, account.IsShadow(), normalizedExtra)
 		if err != nil {
 			return nil, err
@@ -589,6 +661,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := ValidateUpstreamRequestIDHeaderExtra(normalizedExtra); err != nil {
 			return nil, err
 		}
+		delete(normalizedExtra, AccountProxyPoolIDsExtraKey)
+		delete(normalizedExtra, AccountProxyLaneConfigsExtraKey)
+		delete(normalizedExtra, AccountProxyLaneStrategyExtraKey)
 	}
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
 	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
@@ -640,6 +715,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := NormalizeHeaderOverrideCredentials(account.Credentials); err != nil {
 			return nil, err
 		}
+		if err := NormalizeOpenCodeGoProtocolRulesCredentials(account.Credentials); err != nil {
+			return nil, err
+		}
 		// Strip SSO/password residue that must never sit next to OAuth tokens.
 		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
 	}
@@ -680,11 +758,15 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			OllamaCloudUsageAutoRefreshExtraKey,
 			OllamaCloudUsageSnapshotExtraKey,
 			OpenAIAutoResetCreditStateExtraKey,
+			AccountProxyPoolIDsExtraKey,
+			AccountProxyLaneConfigsExtraKey,
+			AccountProxyLaneStrategyExtraKey,
 		} {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v
 			}
 		}
+		normalizedExtra = MergeOpenAICodexTicketExtra(normalizedExtra, account.Extra)
 		normalizedExtra = prepareCodexFingerprintExtraForUpdate(account, normalizedExtra)
 		account.Extra = normalizedExtra
 		if account.Platform == PlatformAntigravity && wasOveragesEnabled && !account.IsOveragesEnabled() {
@@ -747,6 +829,24 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			account.ProxyID = input.ProxyID
 		}
 		account.Proxy = nil // 清除关联对象，防止 GORM Save 时根据 Proxy.ID 覆盖 ProxyID
+		account.Extra = NormalizeAccountProxyPoolExtra(account.Extra, account.ProxyID)
+	}
+	if input.ProxyPoolIDs != nil {
+		if account.IsCredentialShadow() {
+			return nil, infraerrors.BadRequest("SPARK_SHADOW_PROXY_POOL_UNSUPPORTED", "spark shadow accounts inherit the parent proxy pool")
+		}
+		proxyPoolIDs, poolErr := s.validateAccountProxyPool(ctx, *input.ProxyPoolIDs, account.ProxyID)
+		if poolErr != nil {
+			return nil, poolErr
+		}
+		account.Extra = NormalizeAccountProxyPoolExtra(account.Extra, account.ProxyID)
+		account.Extra[AccountProxyPoolIDsExtraKey] = proxyPoolIDs
+	}
+	if input.ProxyLaneConfigs != nil {
+		account.Extra[AccountProxyLaneConfigsExtraKey] = append([]ProxyLaneConfig(nil), (*input.ProxyLaneConfigs)...)
+	}
+	if input.ProxyLaneStrategy != nil {
+		account.Extra[AccountProxyLaneStrategyExtraKey] = *input.ProxyLaneStrategy
 	}
 	if !reflect.DeepEqual(previousProbeIdentity, upstreamBillingProbeIdentity(account)) && account.Extra != nil {
 		delete(account.Extra, UpstreamBillingProbeExtraKey)
@@ -769,6 +869,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	// 只在指针非 nil 时更新 Concurrency（支持设置为 0）
 	if input.Concurrency != nil {
 		account.Concurrency = normalizeAccountConcurrency(account.Platform, account.Type, *input.Concurrency)
+	}
+	if input.ProxyID != nil || input.ProxyPoolIDs != nil || input.ProxyLaneConfigs != nil || input.ProxyLaneStrategy != nil || input.Concurrency != nil {
+		account.Extra = NormalizeAccountProxyLaneExtra(account.Extra, account.ProxyID, account.Concurrency)
 	}
 	// 只在指针非 nil 时更新 Priority（支持设置为 0）
 	if input.Priority != nil {
@@ -869,7 +972,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 
 	// 将 proxy 变更传播到 spark 影子账号（同步；Update 内部已触发调度快照）。
 	// 影子自身 proxy 不可独立编辑(见上),故对影子的更新不触发传播。
-	if input.ProxyID != nil && !account.IsCredentialShadow() {
+	if (input.ProxyID != nil || input.ProxyPoolIDs != nil || input.ProxyLaneConfigs != nil || input.ProxyLaneStrategy != nil) && !account.IsCredentialShadow() {
 		if err := s.propagateProxyToShadows(ctx, id, account.ProxyID); err != nil {
 			return nil, err
 		}
@@ -893,6 +996,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
 // （如 model_rate_limits / passive_usage_* 等）。
 func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error {
+	updates = MergeOpenAICodexTicketExtra(updates, nil)
 	updates = sanitizedCodexFingerprintExtraUpdates(updates)
 	updates = stripOpenAIAutoResetCreditManagedExtra(updates, true)
 	delete(updates, UpstreamBillingProbeEnabledExtraKey)
@@ -901,6 +1005,9 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, OllamaCloudUsageSessionExtraKey)
 	delete(updates, OllamaCloudUsageAutoRefreshExtraKey)
 	delete(updates, OllamaCloudUsageSnapshotExtraKey)
+	delete(updates, AccountProxyPoolIDsExtraKey)
+	delete(updates, AccountProxyLaneConfigsExtraKey)
+	delete(updates, AccountProxyLaneStrategyExtraKey)
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -920,6 +1027,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
 	// Managed probe/session state may only enter through dedicated typed endpoints.
+	input.Extra = MergeOpenAICodexTicketExtra(input.Extra, nil)
 	input.Extra = sanitizedCodexFingerprintExtraUpdates(input.Extra)
 	input.Extra = stripOpenAIAutoResetCreditManagedExtra(input.Extra, true)
 	delete(input.Extra, UpstreamBillingProbeEnabledExtraKey)
@@ -928,6 +1036,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	delete(input.Extra, OllamaCloudUsageSessionExtraKey)
 	delete(input.Extra, OllamaCloudUsageAutoRefreshExtraKey)
 	delete(input.Extra, OllamaCloudUsageSnapshotExtraKey)
+	delete(input.Extra, AccountProxyPoolIDsExtraKey)
+	delete(input.Extra, AccountProxyLaneConfigsExtraKey)
+	delete(input.Extra, AccountProxyLaneStrategyExtraKey)
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)
@@ -1065,6 +1176,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
+	if err := NormalizeOpenCodeGoProtocolRulesCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
 	// Bulk may mix platforms; always drop ephemeral SSO/password keys (cookie
 	// only when platform is known Grok — empty platform still strips password/*).
 	if input.Credentials != nil {
@@ -1072,6 +1186,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 
 	// Prepare bulk updates for columns and JSONB fields.
+	delete(input.Extra, AccountProxyPoolIDsExtraKey)
+	delete(input.Extra, AccountProxyLaneConfigsExtraKey)
+	delete(input.Extra, AccountProxyLaneStrategyExtraKey)
 	repoUpdates := AccountBulkUpdate{
 		Credentials:                input.Credentials,
 		Extra:                      input.Extra,
@@ -1411,6 +1528,9 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		Schedulable:     true,
 		Extra: map[string]any{
 			openAILongContextBillingEnabledKey: parent.IsOpenAILongContextBillingEnabled(),
+			AccountProxyPoolIDsExtraKey:        AccountProxyPoolIDs(parent.Extra),
+			AccountProxyLaneConfigsExtraKey:    parent.ProxyLaneConfigs(),
+			AccountProxyLaneStrategyExtraKey:   ProxyLaneStrategy(parent.Extra),
 		},
 	}
 
@@ -1458,8 +1578,22 @@ func propagateAccountProxyToShadows(ctx context.Context, repo AccountRepository,
 	if err != nil {
 		return fmt.Errorf("list spark shadows for proxy propagation: %w", err)
 	}
+	if len(shadows) == 0 {
+		return nil
+	}
+	parent, err := repo.GetByID(ctx, parentID)
+	if err != nil {
+		return fmt.Errorf("load parent account proxy pool: %w", err)
+	}
+	inheritedPoolIDs := AccountProxyPoolIDs(parent.Extra)
+	inheritedLaneConfigs := parent.ProxyLaneConfigs()
+	inheritedLaneStrategy := ProxyLaneStrategy(parent.Extra)
 	for _, shadow := range shadows {
 		shadow.ProxyID = proxyID
+		shadow.Extra = NormalizeAccountProxyPoolExtra(shadow.Extra, proxyID)
+		shadow.Extra[AccountProxyPoolIDsExtraKey] = append([]int64(nil), inheritedPoolIDs...)
+		shadow.Extra[AccountProxyLaneConfigsExtraKey] = append([]ProxyLaneConfig(nil), inheritedLaneConfigs...)
+		shadow.Extra[AccountProxyLaneStrategyExtraKey] = inheritedLaneStrategy
 		if err := repo.Update(ctx, shadow); err != nil {
 			return fmt.Errorf("update spark shadow %d proxy: %w", shadow.ID, err)
 		}

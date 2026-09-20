@@ -477,7 +477,7 @@ func (s *OpenAIGatewayService) selectAccountByPreviousResponseIDForCapability(
 		return nil, nil
 	}
 
-	result, acquireErr := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+	result, acquireErr := s.tryAcquireAccountSlot(ctx, accountID, account.EffectiveConcurrency())
 	if acquireErr == nil && result.Acquired {
 		logOpenAIWSBindResponseAccountWarn(
 			derefGroupID(groupID),
@@ -498,7 +498,7 @@ func (s *OpenAIGatewayService) selectAccountByPreviousResponseIDForCapability(
 			Account: account,
 			WaitPlan: &AccountWaitPlan{
 				AccountID:      accountID,
-				MaxConcurrency: account.Concurrency,
+				MaxConcurrency: account.EffectiveConcurrency(),
 				Timeout:        cfg.StickySessionWaitTimeout,
 				MaxWaiting:     cfg.StickySessionMaxWaiting,
 			},
@@ -623,7 +623,7 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 		if vetoed, _ := openAIProfitControlVetoReason(ctx, latest); vetoed {
 			return 0, nil, "", nil
 		}
-		if s.isOpenAIAccountRequestRuntimeBlocked(latest, requestedModel) {
+		if s.isOpenAIAccountRequestRuntimeBlocked(latest, requestedModel, requireCompact) {
 			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return 0, nil, "", nil
 		}

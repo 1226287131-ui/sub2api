@@ -57,6 +57,10 @@ var schedulerNeutralExtraKeyPrefixes = []string{
 	"codex_5h_",
 	"codex_7d_",
 	"codex_reset_credit_",
+	// 292 门票是纯运行态凭据：它不在 filterSchedulerExtra 的投影白名单里，
+	// 因此 bucket 重建事件永远搬不动门票状态，续期时开事务+发 outbox 是白干。
+	// 归为观测型后仍会同步单账号快照（见 UpdateExtra），不丢任何新鲜度。
+	"codex_turn_ticket:",
 	"passive_usage_",
 	"upstream_billing_probe",
 	"upstream_billing_rate_sync",
@@ -311,10 +315,16 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 	}
 
 	accountIDs := make([]int64, 0, len(entAccounts))
+	proxyPoolIDs := make([]int64, 0)
 	entByID := make(map[int64]*dbent.Account, len(entAccounts))
 	for _, acc := range entAccounts {
 		entByID[acc.ID] = acc
 		accountIDs = append(accountIDs, acc.ID)
+		proxyPoolIDs = append(proxyPoolIDs, service.AccountProxyPoolIDs(acc.Extra)...)
+	}
+	proxyPoolMap, err := r.loadProxies(ctx, proxyPoolIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	groupsByAccount, groupIDsByAccount, accountGroupsByAccount, err := r.loadAccountGroups(ctx, accountIDs)
@@ -333,6 +343,9 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 		if entAcc.Edges.Proxy != nil {
 			out.Proxy = proxyEntityToService(entAcc.Edges.Proxy)
 		}
+		out.ProxyPool = proxiesForIDs(proxyPoolMap, service.AccountProxyPoolIDs(out.Extra))
+		out.ProxyPoolHydrated = true
+		service.RegisterAccountProxyPool(out)
 
 		if groups, ok := groupsByAccount[entAcc.ID]; ok {
 			out.Groups = groups
@@ -646,7 +659,8 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'upstream_billing_probe',
 			extra -> 'ollama_cloud_usage_session',
 			extra -> 'ollama_cloud_usage_auto_refresh',
-			extra -> 'ollama_cloud_usage_snapshot'
+			extra -> 'ollama_cloud_usage_snapshot',
+			COALESCE(extra, '{}'::jsonb)
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -672,6 +686,7 @@ func lockAndMergeAccountProbeExtra(
 		currentOllamaSession         []byte
 		currentOllamaAutoRefresh     []byte
 		currentOllamaSnapshot        []byte
+		currentExtraJSON             []byte
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -683,6 +698,7 @@ func lockAndMergeAccountProbeExtra(
 		&currentOllamaSession,
 		&currentOllamaAutoRefresh,
 		&currentOllamaSnapshot,
+		&currentExtraJSON,
 	); err != nil {
 		return nil, err
 	}
@@ -690,7 +706,20 @@ func lockAndMergeAccountProbeExtra(
 		return nil, err
 	}
 
-	extra := copyJSONMap(normalizeJSONMap(account.Extra))
+	// extra 理论上恒为 JSON 对象，但历史数据若存成非对象（数组/标量），在此硬失败
+	// 会让该账号的任何编辑都保存不了——而这条路径覆盖所有平台的账号更新。
+	// 门票是 1 小时 TTL 的临时凭据，下个打票周期会自动补回，因此解析失败时降级为
+	// 「无门票可保留」继续完成编辑，不要把整个账号更新拖垮。
+	var currentExtra map[string]any
+	if len(currentExtraJSON) > 0 {
+		if err := json.Unmarshal(currentExtraJSON, &currentExtra); err != nil {
+			logger.LegacyPrintf("repository.account",
+				"[Account] current extra unmarshal failed, codex ticket preservation skipped: id=%d err=%v",
+				account.ID, err)
+			currentExtra = nil
+		}
+	}
+	extra := service.MergeOpenAICodexTicketExtra(copyJSONMap(normalizeJSONMap(account.Extra)), currentExtra)
 	for _, key := range []string{
 		service.UpstreamBillingProbeEnabledExtraKey,
 		service.UpstreamBillingRateSyncEnabledExtraKey,
@@ -1211,11 +1240,20 @@ func (r *accountRepository) ListOAuthRefreshCandidatePage(ctx context.Context, o
 	// NOT (a AND b) 在 PG 三值逻辑下会把 a 或 b 为 NULL 的行（即绝大多数
 	// 健康账号：temp_unschedulable_until=NULL）也排除，导致后台 token
 	// 刷新工作器漏掉所有正常账号 → access_token 到期后请求开始 401。
+	//
+	// Deliberately NO `schedulable = TRUE` filter here: paused accounts
+	// (schedulable=false, status=active) still hold valid refresh tokens and
+	// their stored access_token must keep working for the admin usage-window
+	// probe. Excluding them lets the token silently expire, after which the
+	// dashboard reports a false "needs re-auth" even though Test Connection
+	// (which refreshes on demand) succeeds. Permanent rejection is already
+	// covered by the status = 'active' filter (error accounts drop out), and
+	// accounts whose refresh actually fails are rate-limited by the
+	// ExcludeRetryCooldown clause below.
 	query := `
 		SELECT id
 		FROM accounts
 		WHERE deleted_at IS NULL
-			AND schedulable = TRUE
 			AND platform = ANY($1)
 			AND id > $2`
 	if options.ActiveOnly {
@@ -2257,6 +2295,61 @@ func (r *accountRepository) ClearRateLimitIfObserved(ctx context.Context, id int
 	return true, nil
 }
 
+// SetRateLimitedIfUnchanged atomically applies a rate-limit reset only while the
+// account still carries exactly the generation the caller observed: its
+// UpdatedAt row version, its RateLimitedAt and its RateLimitResetAt (nil means
+// that field is currently unset). It is the write-back CAS counterpart to
+// ClearRateLimitIfObserved: an async rate-limit reset (e.g. an Ollama Cloud
+// usage probe) must not overwrite a newer 429, an admin clear, a re-armed
+// generation, or a key/state change observed by another writer between the
+// caller's read and this write. The whole update is a single statement, so the
+// write itself is race-free. updated reports whether the write happened, and the
+// caller must ONLY send its scheduling notification when updated == true (this
+// method already performed the DB update; no further SetRateLimited call is
+// allowed, as a second unconditional write would reintroduce the race). No new
+// migration is required.
+func (r *accountRepository) SetRateLimitedIfUnchanged(
+	ctx context.Context,
+	id int64,
+	expectedUpdatedAt time.Time,
+	expectedLimitedAt, expectedResetAt *time.Time,
+	newResetAt time.Time,
+) (bool, error) {
+	preds := []dbpredicate.Account{dbaccount.IDEQ(id), dbaccount.UpdatedAtEQ(expectedUpdatedAt)}
+	if expectedLimitedAt == nil {
+		preds = append(preds, dbaccount.RateLimitedAtIsNil())
+	} else {
+		preds = append(preds, dbaccount.RateLimitedAtEQ(*expectedLimitedAt))
+	}
+	if expectedResetAt == nil {
+		preds = append(preds, dbaccount.RateLimitResetAtIsNil())
+	} else {
+		preds = append(preds, dbaccount.RateLimitResetAtEQ(*expectedResetAt))
+	}
+
+	now := time.Now()
+	updated, err := r.client.Account.Update().
+		Where(preds...).
+		SetRateLimitedAt(now).
+		SetRateLimitResetAt(newResetAt).
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	if updated == 0 {
+		// The generation changed concurrently (cleared, re-armed, or the account
+		// was otherwise updated elsewhere): do not announce anything, just
+		// refresh the local scheduler snapshot.
+		r.syncSchedulerAccountSnapshot(ctx, id)
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue rate limit failed: account=%d err=%v", id, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
+}
+
 func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, scope string, resetAt time.Time, reason ...string) error {
 	if scope == "" {
 		return nil
@@ -3156,6 +3249,7 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 		if acc.ProxyFallbackOriginID != nil {
 			proxyIDs = append(proxyIDs, *acc.ProxyFallbackOriginID)
 		}
+		proxyIDs = append(proxyIDs, service.AccountProxyPoolIDs(acc.Extra)...)
 	}
 
 	proxyMap, err := r.loadProxies(ctx, proxyIDs)
@@ -3178,6 +3272,9 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 				out.Proxy = proxy
 			}
 		}
+		out.ProxyPool = proxiesForIDs(proxyMap, service.AccountProxyPoolIDs(out.Extra))
+		out.ProxyPoolHydrated = true
+		service.RegisterAccountProxyPool(out)
 		out.ProxyFallbackOriginID = acc.ProxyFallbackOriginID
 		if acc.ProxyFallbackOriginID != nil {
 			if op, ok := proxyMap[*acc.ProxyFallbackOriginID]; ok && op != nil {
@@ -3239,6 +3336,19 @@ func (r *accountRepository) loadProxies(ctx context.Context, proxyIDs []int64) (
 		}
 	}
 	return proxyMap, nil
+}
+
+func proxiesForIDs(proxyMap map[int64]*service.Proxy, ids []int64) []*service.Proxy {
+	if len(ids) == 0 || len(proxyMap) == 0 {
+		return nil
+	}
+	out := make([]*service.Proxy, 0, len(ids))
+	for _, id := range ids {
+		if proxy := proxyMap[id]; proxy != nil {
+			out = append(out, proxy)
+		}
+	}
+	return out
 }
 
 func (r *accountRepository) loadAccountGroups(ctx context.Context, accountIDs []int64) (map[int64][]*service.Group, map[int64][]int64, map[int64][]service.AccountGroup, error) {

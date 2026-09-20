@@ -53,7 +53,7 @@
             @select="editBaseUrl = $event"
           />
           <CnBaseUrlPresets
-            v-if="isCNApiKeyAccount"
+            v-if="isCNApiKeyAccount && account.platform !== 'opencode_go'"
             class="mt-2"
             :platform="cnPresetPlatform"
             :mode="editAccountMode"
@@ -76,8 +76,60 @@
             {{ t('admin.accounts.cnProviders.apiProtocol.responsesFallbackDesc') }}
           </p>
         </div>
+        <!-- OpenCode Zen vs GO -->
+        <div v-if="isCNApiKeyAccount && account.platform === 'opencode_go'">
+          <label class="input-label">{{ t('admin.accounts.cnProviders.accountMode.title') }}</label>
+          <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              @click="editOpenCodeAccountMode = 'zen'"
+              :class="[
+                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+                editOpenCodeAccountMode === 'zen'
+                  ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
+                  : 'border-gray-200 hover:border-gray-400 dark:border-dark-600 dark:hover:border-gray-600'
+              ]"
+            >
+              <div
+                :class="[
+                  'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                  editOpenCodeAccountMode === 'zen' ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+                ]"
+              >
+                <Icon name="creditCard" size="sm" />
+              </div>
+              <div>
+                <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.accounts.opencodeGo.accountMode.zen') }}</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.opencodeGo.accountMode.zenDesc') }}</span>
+              </div>
+            </button>
+            <button
+              type="button"
+              @click="editOpenCodeAccountMode = 'go'"
+              :class="[
+                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+                editOpenCodeAccountMode === 'go'
+                  ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
+                  : 'border-gray-200 hover:border-gray-400 dark:border-dark-600 dark:hover:border-gray-600'
+              ]"
+            >
+              <div
+                :class="[
+                  'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                  editOpenCodeAccountMode === 'go' ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+                ]"
+              >
+                <Icon name="bolt" size="sm" />
+              </div>
+              <div>
+                <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.accounts.opencodeGo.accountMode.go') }}</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.opencodeGo.accountMode.goDesc') }}</span>
+              </div>
+            </button>
+          </div>
+        </div>
         <!-- Account Mode Selection (CN providers) -->
-        <div v-if="isCNApiKeyAccount">
+        <div v-if="isCNApiKeyAccount && account.platform !== 'opencode_go'">
           <label class="input-label">{{ t('admin.accounts.cnProviders.accountMode.title') }}</label>
           <div class="mt-2 flex flex-wrap gap-2">
             <button
@@ -97,7 +149,7 @@
           </div>
           <p class="input-hint">{{ t(`admin.accounts.cnProviders.accountMode.${editAccountMode}Desc`) }}</p>
         </div>
-        <!-- API Protocol Selection (CN providers) -->
+        <!-- API Protocol Selection (CN providers / OpenCode) -->
         <div v-if="isCNApiKeyAccount">
           <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.title') }}</label>
           <div class="mt-2 flex flex-wrap gap-2">
@@ -118,6 +170,11 @@
           </div>
           <p class="input-hint">{{ t(`admin.accounts.cnProviders.apiProtocol.${cnProtocolDescKey}Desc`) }}</p>
         </div>
+        <OpenCodeGoProtocolRulesEditor
+          v-if="account.platform === 'opencode_go' && editApiProtocol === 'adaptive'"
+          v-model:rows="editOpenCodeGoProtocolRules"
+          :plan="editOpenCodeAccountMode"
+        />
         <!-- Zhipu 团队版 Coding Plan：组织/项目 ID（可选，填写后用量查询走团队版端点） -->
         <div v-if="account.platform === 'zhipu' && editAccountMode === 'coding'">
           <div class="flex items-center">
@@ -1592,6 +1649,27 @@
           <ProxyAdBanner />
         </div>
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
+        <div class="mt-3">
+          <label class="input-label">{{ t('admin.accounts.proxyPool') }}</label>
+          <ProxyPoolSelector
+            v-model="form.proxy_pool_ids"
+            :proxies="proxies"
+            :primary-proxy-id="form.proxy_id"
+            :lane-configs="form.proxy_lane_configs"
+            :lane-strategy="form.proxy_lane_strategy"
+            :account-concurrency="form.concurrency"
+            @update:lane-configs="form.proxy_lane_configs = $event"
+            @update:lane-strategy="form.proxy_lane_strategy = $event"
+          />
+          <p class="input-hint">{{ t('admin.accounts.proxyPoolHint') }}</p>
+        </div>
+        <div class="mt-4">
+          <SmartProxyAssignmentPanel
+            v-model="smartProxyOptions"
+            :loading="assigningSmartProxies"
+            @apply="handleSmartProxyAssignment"
+          />
+        </div>
       </div>
 
       <UpstreamRequestIdHeaderField
@@ -1814,8 +1892,8 @@
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.openai.wsModeDesc') }}
             </p>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {{ t(openAIWSModeConcurrencyHintKey) }}
+            <p v-if="openAIWSModeHintKey" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t(openAIWSModeHintKey) }}
             </p>
           </div>
           <div class="w-52">
@@ -2191,6 +2269,44 @@
               ]"
             />
           </button>
+        </div>
+      </div>
+
+      <!-- Codex Turn State 门票策略与状态（仅 OpenAI OAuth/SetupToken） -->
+      <div
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token')"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicket') }}</label>
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.openai.codexTurnTicketDesc') }}
+        </p>
+        <div class="mt-3 space-y-2">
+          <div v-for="ticket in codexTurnTickets" :key="ticket.model" class="rounded-md bg-gray-50 px-3 py-2 text-sm dark:bg-dark-700">
+            <div class="flex items-center justify-between gap-3">
+              <span class="font-medium">{{ ticket.model }}</span>
+              <span :class="codexTicketStatusClass(ticket)">{{ codexTicketStatusLabel(ticket) }}</span>
+            </div>
+            <div class="mt-2 grid gap-2 sm:grid-cols-[auto_1fr_1fr_auto]">
+              <Toggle :id="`codex-ticket-${ticket.model}-enabled`" v-model="codexTicketModelSettings[ticket.model].enabled" />
+              <Select v-model="codexTicketModelSettings[ticket.model].target_mode" :options="codexTicketTargetModeOptions" />
+              <input v-model.number="codexTicketModelSettings[ticket.model].target_length" type="number" min="128" max="2048" class="input w-full" :disabled="codexTicketModelSettings[ticket.model].target_mode !== 'manual'" />
+              <Select v-model="codexTicketModelSettings[ticket.model].missing_policy" :options="codexTicketMissingPolicyOptions" />
+              <button type="button" class="btn-secondary whitespace-nowrap" :disabled="codexTicketProbeLoading[ticket.model]" @click="probeCodexTicket(ticket.model)">
+                {{ codexTicketProbeLoading[ticket.model] ? t('admin.accounts.openai.codexTicketProbing') : t('admin.accounts.openai.codexTicketProbeNow') }}
+              </button>
+            </div>
+            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.codexTicketStatusDetail', {
+                target: ticket.target_length,
+                current: codexTicketCurrentLength(ticket),
+                policy: ticket.missing_policy === 'pause'
+                  ? t('admin.accounts.openai.codexTicketPolicyPauseShort')
+                  : t('admin.accounts.openai.codexTicketPolicyAllowShort')
+              }) }}
+              <span v-if="ticket.next_probe_at"> · {{ t('admin.accounts.openai.codexTicketNextProbe', { time: formatDateTime(ticket.next_probe_at) }) }}</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2979,7 +3095,10 @@ import type {
   OpenAIEndpointCapability,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState
+  GrokMediaEligibilityState,
+  SmartProxyAssignmentOptions,
+  ProxyLaneConfig,
+  ProxyLaneStrategy
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -2989,21 +3108,29 @@ import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestId
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
+import ProxyPoolSelector from '@/components/common/ProxyPoolSelector.vue'
+import SmartProxyAssignmentPanel from '@/components/account/SmartProxyAssignmentPanel.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
 import QuotaLimitCard from '@/components/account/QuotaLimitCard.vue'
 import GrokBaseUrlPresets from '@/components/account/GrokBaseUrlPresets.vue'
 import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
+import OpenCodeGoProtocolRulesEditor from '@/components/account/OpenCodeGoProtocolRulesEditor.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import OllamaCloudUsageSettings from '@/components/account/OllamaCloudUsageSettings.vue'
 import {
   applyAntigravityProjectID,
   applyHeaderOverride,
   applyInterceptWarmup,
+  applyOpenCodeGoProtocolRules,
   applyPlanType,
   buildPlanTypeOptions,
+  cloneOpenCodeGoProtocolRules,
+  defaultOpenCodeProtocolRules,
+  parseOpenCodeGoProtocolRules,
   readPlanType,
+  resolveOpenCodeAccountMode,
   isCustomGrokBaseUrl,
   isHeaderOverrideCapable,
   splitHeaderOverridesObject,
@@ -3018,7 +3145,9 @@ import {
   type CnApiProtocol,
   type CnNativeApiProtocol,
   type CnProviderPlatform,
-  type HeaderOverrideRow
+  type HeaderOverrideRow,
+  type OpenCodeAccountMode,
+  type OpenCodeGoProtocolRule
 } from '@/components/account/credentialsBuilder'
 import {
   formatDateTime,
@@ -3036,7 +3165,7 @@ import {
   OPENAI_WS_MODE_PASSTHROUGH,
   OPENAI_WS_MODE_HTTP_BRIDGE,
   isOpenAIWSModeEnabled,
-  resolveOpenAIWSModeConcurrencyHintKey,
+  resolveOpenAIWSModeHintKey,
   type OpenAIWSMode,
   resolveOpenAIWSModeFromExtra
 } from '@/utils/openaiWsMode'
@@ -3080,6 +3209,81 @@ const selectableGroups = computed(() => {
 // 故隐藏代理选择器。
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 
+const codexTurnTickets = computed(() => props.account?.codex_turn_tickets ?? [])
+
+type CodexTicketModelSetting = {
+  enabled: boolean
+  target_mode: CodexTicketTargetMode
+  target_length: number
+  missing_policy: CodexTicketMissingPolicy
+}
+
+const codexTicketModelSettings = reactive<Record<string, CodexTicketModelSetting>>({
+  'gpt-6-astra': { enabled: true, target_mode: 'auto', target_length: 332, missing_policy: 'allow' },
+  'gpt-5.6-sol': { enabled: true, target_mode: 'auto', target_length: 332, missing_policy: 'allow' },
+})
+const codexTicketProbeLoading = reactive<Record<string, boolean>>({})
+
+type CodexTicketStatus = NonNullable<Account['codex_turn_tickets']>[number]
+
+function formatCodexTicketRemaining(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds || 0))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}m${String(s).padStart(2, '0')}s`
+}
+
+function codexTicketStatusLabel(ticket: CodexTicketStatus) {
+  if (ticket.ready) {
+    return t('admin.accounts.openai.codexTurnTicketReady', {
+      time: formatCodexTicketRemaining(ticket.remaining_seconds)
+    })
+  }
+  const keyByType: Record<string, string> = {
+    non_target: 'codexTicketTypeNonTarget',
+    expired: 'codexTicketTypeExpired',
+    rate_limited: 'codexTicketTypeRateLimited',
+    quota_exhausted: 'codexTicketTypeQuotaExhausted',
+    error: 'codexTicketTypeError',
+    http_error: 'codexTicketTypeError',
+    token_error: 'codexTicketTypeError',
+    disabled: 'codexTicketTypeDisabled'
+  }
+  const key = keyByType[ticket.ticket_type]
+  if (key) return t(`admin.accounts.openai.${key}`)
+  return ticket.blocked
+    ? t('admin.accounts.openai.codexTurnTicketPaused', { length: ticket.target_length })
+    : t('admin.accounts.openai.codexTurnTicketMissing')
+}
+
+function codexTicketCurrentLength(ticket: CodexTicketStatus) {
+  return ticket.ready
+    ? ticket.length || ticket.observed_length || '-'
+    : ticket.observed_length || ticket.length || '-'
+}
+
+function codexTicketStatusClass(ticket: CodexTicketStatus) {
+  if (ticket.ready) return 'text-emerald-600 dark:text-emerald-400'
+  if (ticket.ticket_type === 'rate_limited' || ticket.ticket_type === 'quota_exhausted') {
+    return 'text-red-600 dark:text-red-400'
+  }
+  if (ticket.blocked) return 'text-amber-600 dark:text-amber-400'
+  return 'text-gray-500'
+}
+
+async function probeCodexTicket(model: string) {
+  if (!props.account) return
+  codexTicketProbeLoading[model] = true
+  try {
+    const result = await adminAPI.accounts.probeCodexTicket(props.account.id, model)
+    emit('updated', { ...props.account, codex_turn_tickets: result.tickets })
+  } catch (error: any) {
+    appStore.showError(error?.message || t('admin.accounts.openai.codexTicketProbeFailed'))
+  } finally {
+    codexTicketProbeLoading[model] = false
+  }
+}
+
 const hideAccountLongContextBilling = computed(() => {
   return allSelectedGroupsEnableLongContextPricing(form.group_ids, props.groups)
 })
@@ -3122,7 +3326,9 @@ const editApiKey = ref('')
 // account_mode 决定额度/余额监控路径，api_protocol 决定转发端点与格式；
 // 二者均可修正（早期创建的账号可能存错默认值），切换时重置 base_url 预置。
 const isCNApiKeyAccount = computed(
-  () => props.account?.type === 'apikey' && isCNProviderPlatform(props.account.platform)
+  () =>
+    props.account?.type === 'apikey' &&
+    (isCNProviderPlatform(props.account.platform) || props.account.platform === 'opencode_go')
 )
 // CnBaseUrlPresets 的 platform prop 是平台字面量联合类型，模板里不能写
 // `as` 断言（其中的 `|` 会被 eslint 误判为 Vue2 filter 语法），经此 computed 传递。
@@ -3133,8 +3339,17 @@ const cnPresetPlatform = computed<CnProviderPlatform>(() => {
   }
   return 'kimi'
 })
+const adaptivePresetPlatform = computed<CnProviderPlatform | 'opencode_go'>(() => {
+  if (props.account?.platform === 'opencode_go') return 'opencode_go'
+  return cnPresetPlatform.value
+})
 const editApiProtocol = ref<CnApiProtocol>('adaptive')
+const editOpenCodeGoProtocolRules = ref<OpenCodeGoProtocolRule[]>(cloneOpenCodeGoProtocolRules())
 const editAccountMode = ref<CnAccountMode>('payg')
+const editOpenCodeAccountMode = ref<OpenCodeAccountMode>('go')
+function currentOpenCodeOrCNMode(): CnAccountMode | OpenCodeAccountMode {
+  return props.account?.platform === 'opencode_go' ? editOpenCodeAccountMode.value : editAccountMode.value
+}
 // 智谱团队版 Coding Plan：组织/项目 ID，写入 credentials 供额度探测切换团队端点
 const editZhipuOrganization = ref('')
 const editZhipuProject = ref('')
@@ -3182,7 +3397,7 @@ const editAdaptiveProtocolOptions = computed<Array<{ value: CnNativeApiProtocol;
 watch(editApiProtocol, (protocol, previousProtocol) => {
   if (!isCNApiKeyAccount.value || syncingForm.value) return
   if (protocol === 'adaptive') {
-    const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, editAccountMode.value)
+    const defaults = defaultCNAdaptiveBaseUrls(adaptivePresetPlatform.value, currentOpenCodeOrCNMode())
     for (const item of editAdaptiveProtocolOptions.value) {
       if (!editAdaptiveBaseUrls.value[item.value]) editAdaptiveBaseUrls.value[item.value] = defaults[item.value]
     }
@@ -3194,13 +3409,14 @@ watch(editApiProtocol, (protocol, previousProtocol) => {
   }
   if (previousProtocol === 'adaptive') {
     editBaseUrl.value = editAdaptiveBaseUrls.value[protocol] ||
-      defaultCNBaseUrl(props.account!.platform, editAccountMode.value, protocol)
+      defaultCNBaseUrl(props.account!.platform, currentOpenCodeOrCNMode(), protocol)
     return
   }
-  editBaseUrl.value = defaultCNBaseUrl(props.account!.platform, editAccountMode.value, protocol)
+  editBaseUrl.value = defaultCNBaseUrl(props.account!.platform, currentOpenCodeOrCNMode(), protocol)
 })
 watch(editAccountMode, (mode, previousMode) => {
   if (!isCNApiKeyAccount.value || syncingForm.value) return
+  if (props.account?.platform === 'opencode_go') return
   // deepseek 无 coding 套餐：防御性回退（UI 已隐藏该选项）。
   const effectiveMode = props.account!.platform === 'deepseek' && mode === 'coding' ? 'payg' : mode
   if (effectiveMode !== mode) {
@@ -3208,8 +3424,8 @@ watch(editAccountMode, (mode, previousMode) => {
     return
   }
   if (editApiProtocol.value === 'adaptive') {
-    const previousDefaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, previousMode)
-    const nextDefaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, mode)
+    const previousDefaults = defaultCNAdaptiveBaseUrls(adaptivePresetPlatform.value, previousMode)
+    const nextDefaults = defaultCNAdaptiveBaseUrls(adaptivePresetPlatform.value, mode)
     for (const item of editAdaptiveProtocolOptions.value) {
       if (!editAdaptiveBaseUrls.value[item.value] || editAdaptiveBaseUrls.value[item.value] === previousDefaults[item.value]) {
         editAdaptiveBaseUrls.value[item.value] = nextDefaults[item.value]
@@ -3219,6 +3435,25 @@ watch(editAccountMode, (mode, previousMode) => {
     return
   }
   editBaseUrl.value = defaultCNBaseUrl(props.account!.platform, mode, editApiProtocol.value)
+})
+watch(editOpenCodeAccountMode, (mode, previousMode) => {
+  if (!isCNApiKeyAccount.value || props.account?.platform !== 'opencode_go' || syncingForm.value) return
+  if (editApiProtocol.value === 'adaptive') {
+    const previousDefaults = defaultCNAdaptiveBaseUrls('opencode_go', previousMode)
+    const nextDefaults = defaultCNAdaptiveBaseUrls('opencode_go', mode)
+    for (const item of editAdaptiveProtocolOptions.value) {
+      if (!editAdaptiveBaseUrls.value[item.value] || editAdaptiveBaseUrls.value[item.value] === previousDefaults[item.value]) {
+        editAdaptiveBaseUrls.value[item.value] = nextDefaults[item.value]
+      }
+    }
+    editBaseUrl.value = editAdaptiveBaseUrls.value.chat_completions
+  } else {
+    editBaseUrl.value = defaultCNBaseUrl('opencode_go', mode, editApiProtocol.value)
+  }
+  const previousRules = JSON.stringify(defaultOpenCodeProtocolRules(previousMode))
+  if (JSON.stringify(editOpenCodeGoProtocolRules.value) === previousRules) {
+    editOpenCodeGoProtocolRules.value = cloneOpenCodeGoProtocolRules(defaultOpenCodeProtocolRules(mode))
+  }
 })
 const cnProtocolDescKey = computed(
   () => cnProtocolOptions.value.find(o => o.value === editApiProtocol.value)?.labelKey ?? 'chatCompletions'
@@ -3419,7 +3654,8 @@ const openaiPassthroughEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
-// OpenAI 订阅档位（Plus/Pro/Free）手动覆盖值,存于 credentials.plan_type;'' 表示清空/自动识别
+// OpenAI 订阅档位（Plus / Pro 20x / Pro 5x / Business Standard / Business Premium / Free）手动覆盖值,
+// 存于 credentials.plan_type;'' 表示清空/自动识别
 const editPlanType = ref<string>('')
 const openAICompactMode = ref<OpenAICompactMode>('auto')
 const openAIResponsesMode = ref<OpenAIResponsesMode>('auto')
@@ -3430,6 +3666,11 @@ const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
+type CodexTicketTargetMode = 'auto' | 'manual'
+type CodexTicketMissingPolicy = 'pause' | 'allow'
+const codexTicketTargetMode = ref<CodexTicketTargetMode>('auto')
+const codexTicketTargetLength = ref(332)
+const codexTicketMissingPolicy = ref<CodexTicketMissingPolicy>('allow')
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
@@ -3469,6 +3710,14 @@ const codexFingerprintModeOptions = computed(() => [
   { value: 'session' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintSession') },
   { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
 ])
+const codexTicketTargetModeOptions = computed(() => [
+  { value: 'auto' as CodexTicketTargetMode, label: t('admin.accounts.openai.codexTicketTargetAuto') },
+  { value: 'manual' as CodexTicketTargetMode, label: t('admin.accounts.openai.codexTicketTargetManual') }
+])
+const codexTicketMissingPolicyOptions = computed(() => [
+  { value: 'pause' as CodexTicketMissingPolicy, label: t('admin.accounts.openai.codexTicketMissingPause') },
+  { value: 'allow' as CodexTicketMissingPolicy, label: t('admin.accounts.openai.codexTicketMissingAllow') }
+])
 
 const openAIWSModeOptions = computed(() => [
   { value: OPENAI_WS_MODE_OFF, label: t('admin.accounts.openai.wsModeOff') },
@@ -3491,8 +3740,8 @@ const openaiResponsesWebSocketV2Mode = computed({
     openaiOAuthResponsesWebSocketV2Mode.value = mode
   }
 })
-const openAIWSModeConcurrencyHintKey = computed(() =>
-  resolveOpenAIWSModeConcurrencyHintKey(openaiResponsesWebSocketV2Mode.value)
+const openAIWSModeHintKey = computed(() =>
+  resolveOpenAIWSModeHintKey(openaiResponsesWebSocketV2Mode.value)
 )
 const codexImageToolOptions = computed<Array<{
   value: CodexImageToolMode
@@ -3586,16 +3835,17 @@ const openAITextEndpointCapabilityLabel = computed(() => {
 })
 const openAIEndpointCapabilityOptions = computed<{ value: OpenAIEndpointCapability; label: string }[]>(() => [
   { value: 'chat_completions', label: openAITextEndpointCapabilityLabel.value },
-  { value: 'embeddings', label: t('admin.accounts.openai.capabilityEmbeddings') }
+  { value: 'embeddings', label: t('admin.accounts.openai.capabilityEmbeddings') },
+  { value: 'seedance', label: 'Seedance (Ark)' }
 ])
 const openAITextGenerationCapabilityEnabled = computed(() =>
   openAIEndpointCapabilities.value.includes('chat_completions')
 )
 
 const normalizeOpenAIEndpointCapabilities = (values: OpenAIEndpointCapability[]) => {
-  const allowed: OpenAIEndpointCapability[] = ['chat_completions', 'embeddings']
+  const allowed: OpenAIEndpointCapability[] = ['chat_completions', 'embeddings', 'seedance']
   const selected = allowed.filter((value) => values.includes(value))
-  return selected.length > 0 ? selected : allowed
+  return selected.length > 0 ? selected : ['chat_completions', 'embeddings'] as OpenAIEndpointCapability[]
 }
 
 const readOpenAIEndpointCapabilities = (credentials?: Record<string, unknown>): OpenAIEndpointCapability[] => {
@@ -3603,7 +3853,7 @@ const readOpenAIEndpointCapabilities = (credentials?: Record<string, unknown>): 
   if (Array.isArray(raw)) {
     return normalizeOpenAIEndpointCapabilities(
       raw.filter((value): value is OpenAIEndpointCapability =>
-        value === 'chat_completions' || value === 'embeddings'
+        value === 'chat_completions' || value === 'embeddings' || value === 'seedance'
       )
     )
   }
@@ -3641,7 +3891,7 @@ const toggleOpenAIEndpointCapability = (capability: OpenAIEndpointCapability, ev
 
 const applyOpenAIEndpointCapabilities = (credentials: Record<string, unknown>) => {
   const capabilities = normalizeOpenAIEndpointCapabilities(openAIEndpointCapabilities.value)
-  if (capabilities.length === 2) {
+  if (capabilities.length === 2 && !capabilities.includes('seedance')) {
     delete credentials.openai_capabilities
     return
   }
@@ -3728,9 +3978,10 @@ const defaultBaseUrl = computed(() => {
   if (
     props.account?.platform === 'kimi' ||
     props.account?.platform === 'zhipu' ||
-    props.account?.platform === 'deepseek'
+    props.account?.platform === 'deepseek' ||
+    props.account?.platform === 'opencode_go'
   ) {
-    return defaultCNBaseUrl(props.account.platform, editAccountMode.value, editApiProtocol.value)
+    return defaultCNBaseUrl(props.account.platform, currentOpenCodeOrCNMode(), editApiProtocol.value)
   }
   return 'https://api.anthropic.com'
 })
@@ -3746,6 +3997,9 @@ const form = reactive({
   name: '',
   notes: '',
   proxy_id: null as number | null,
+  proxy_pool_ids: [] as number[],
+  proxy_lane_configs: [] as ProxyLaneConfig[],
+  proxy_lane_strategy: 'round_robin' as ProxyLaneStrategy,
   concurrency: 1,
   load_factor: null as number | null,
   priority: 1,
@@ -3754,6 +4008,15 @@ const form = reactive({
   group_ids: [] as number[],
   expires_at: null as number | null
 })
+
+const smartProxyOptions = ref<SmartProxyAssignmentOptions>({
+  proxy_count: 2,
+  test_latency: true,
+  prefer_low_latency: true,
+  low_latency_limit: 0,
+  weighted_by_load: true
+})
+const assigningSmartProxies = ref(false)
 
 const handleUpstreamBillingRateSyncChange = (enabled: boolean) => {
   upstreamBillingRateSyncEnabled.value = enabled
@@ -3854,6 +4117,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
+  form.proxy_pool_ids = [...(newAccount.proxy_pool_ids ?? [])]
+  form.proxy_lane_configs = (newAccount.proxy_lane_configs ?? []).map((lane) => ({ ...lane }))
+  form.proxy_lane_strategy = newAccount.proxy_lane_strategy ?? 'round_robin'
   form.concurrency = newAccount.concurrency
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority
@@ -3912,6 +4178,13 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
+  codexTicketTargetMode.value = 'auto'
+  codexTicketTargetLength.value = 332
+  codexTicketMissingPolicy.value = 'allow'
+  for (const model of ['gpt-6-astra', 'gpt-5.6-sol']) {
+    codexTicketModelSettings[model] = { enabled: true, target_mode: 'auto', target_length: 332, missing_policy: 'allow' }
+    codexTicketProbeLoading[model] = false
+  }
   codexFingerprintMode.value = 'off'
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
@@ -3963,6 +4236,22 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       codexCLIOnlyEnabled.value = extra?.codex_cli_only === true
       codexCLIOnlyAppServerEnabled.value =
         extra?.codex_cli_only_allow_app_server === true
+      codexTicketTargetMode.value = extra?.codex_ticket_target_mode === 'manual' ? 'manual' : 'auto'
+      const configuredTargetLength = Number(extra?.codex_ticket_target_length)
+      const resolvedTargetLength = newAccount.codex_turn_tickets?.[0]?.target_length
+      codexTicketTargetLength.value = Number.isFinite(configuredTargetLength) && configuredTargetLength >= 128
+        ? Math.trunc(configuredTargetLength)
+        : resolvedTargetLength || 332
+      codexTicketMissingPolicy.value = extra?.codex_ticket_missing_policy === 'pause' ? 'pause' : 'allow'
+      for (const model of ['gpt-6-astra', 'gpt-5.6-sol']) {
+        const modelOverride = extra?.[`codex_ticket_policy:${model}`] as Record<string, unknown> | undefined
+        codexTicketModelSettings[model] = {
+          enabled: modelOverride?.enabled !== false,
+          target_mode: modelOverride?.codex_ticket_target_mode === 'manual' ? 'manual' : 'auto',
+          target_length: Number(modelOverride?.codex_ticket_target_length) || 332,
+          missing_policy: modelOverride?.codex_ticket_missing_policy === 'pause' ? 'pause' : 'allow'
+        }
+      }
     }
     if (newAccount.type === 'oauth') {
       const fpMode = extra?.codex_fingerprint_mode as string | undefined
@@ -4105,8 +4394,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     const credentials = newAccount.credentials as Record<string, unknown>
     // 国产供应商：读取 account_mode 与 api_protocol 作为可编辑初始值
     // （编辑弹窗允许修正两者，用于修复早期存错默认值的账号）。
-    if (isCNProviderPlatform(newAccount.platform)) {
-      editAccountMode.value = credentials.account_mode === 'coding' ? 'coding' : 'payg'
+    if (isCNProviderPlatform(newAccount.platform) || newAccount.platform === 'opencode_go') {
+      if (newAccount.platform === 'opencode_go') {
+        editOpenCodeAccountMode.value = resolveOpenCodeAccountMode(credentials.account_mode)
+      } else {
+        editAccountMode.value = credentials.account_mode === 'coding' ? 'coding' : 'payg'
+      }
       const storedProtocol = credentials.api_protocol
       editApiProtocol.value =
         storedProtocol === 'adaptive' ||
@@ -4118,7 +4411,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       if (!cnSupportsNativeResponses(newAccount.platform) && editApiProtocol.value === 'responses') {
         editApiProtocol.value = 'chat_completions'
       }
-      const adaptiveDefaults = defaultCNAdaptiveBaseUrls(newAccount.platform, editAccountMode.value)
+      const adaptiveDefaults = defaultCNAdaptiveBaseUrls(newAccount.platform, currentOpenCodeOrCNMode())
       const storedBaseUrls = (credentials.api_base_urls as Record<string, unknown> | undefined) || {}
       const legacyBaseUrl = typeof credentials.base_url === 'string' ? credentials.base_url.trim() : ''
       const storedChatBaseUrl = typeof storedBaseUrls.chat_completions === 'string'
@@ -4154,6 +4447,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         editZhipuOrganization.value = typeof credentials.zhipu_organization === 'string' ? credentials.zhipu_organization : ''
         editZhipuProject.value = typeof credentials.zhipu_project === 'string' ? credentials.zhipu_project : ''
       }
+      if (newAccount.platform === 'opencode_go') {
+        editOpenCodeGoProtocolRules.value =
+          parseOpenCodeGoProtocolRules(credentials.protocol_rules) ??
+          cloneOpenCodeGoProtocolRules(defaultOpenCodeProtocolRules(editOpenCodeAccountMode.value))
+      }
     }
     const platformDefaultUrl =
       newAccount.platform === 'openai'
@@ -4164,8 +4462,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
             ? 'https://api.x.ai/v1'
             : newAccount.platform === 'kimi' ||
                 newAccount.platform === 'zhipu' ||
-                newAccount.platform === 'deepseek'
-              ? defaultCNBaseUrl(newAccount.platform, editAccountMode.value, editApiProtocol.value)
+                newAccount.platform === 'deepseek' ||
+                newAccount.platform === 'opencode_go'
+              ? defaultCNBaseUrl(newAccount.platform, currentOpenCodeOrCNMode(), editApiProtocol.value)
               : 'https://api.anthropic.com'
     editBaseUrl.value = isCNApiKeyAccount.value && editApiProtocol.value === 'adaptive'
       ? editAdaptiveBaseUrls.value.chat_completions
@@ -4783,6 +5082,35 @@ const handleClose = () => {
   emit('close')
 }
 
+const handleSmartProxyAssignment = async () => {
+  if (!props.account || props.account.parent_account_id != null) return
+  assigningSmartProxies.value = true
+  try {
+    const result = await adminAPI.accounts.smartAssignProxies(
+      [props.account.id],
+      smartProxyOptions.value
+    )
+    const item = result.items.find((entry) => entry.account_id === props.account?.id)
+    if (!item?.success || !item.primary_proxy_id) {
+      appStore.showError(item?.error || t('admin.accounts.smartProxy.failed'))
+      return
+    }
+    form.proxy_id = item.primary_proxy_id
+    form.proxy_pool_ids = [...(item.proxy_pool_ids ?? [])]
+    const refreshed = await adminAPI.accounts.getById(props.account.id)
+    appStore.showSuccess(t('admin.accounts.smartProxy.success', {
+      success: 1,
+      failed: 0,
+      proxies: 1 + form.proxy_pool_ids.length
+    }))
+    emit('updated', refreshed)
+  } catch (error: any) {
+    appStore.showError(error.message || t('admin.accounts.smartProxy.failed'))
+  } finally {
+    assigningSmartProxies.value = false
+  }
+}
+
 const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Account): Promise<Account> => {
   if (
     !isGrokOAuthAccount.value ||
@@ -4860,6 +5188,15 @@ const handleSubmit = async () => {
 			return
 		}
 	}
+	if (
+		props.account.platform === 'openai' &&
+		(props.account.type === 'oauth' || props.account.type === 'setup-token') &&
+		codexTicketTargetMode.value === 'manual' &&
+		(!Number.isFinite(codexTicketTargetLength.value) || codexTicketTargetLength.value < 128 || codexTicketTargetLength.value > 2048)
+	) {
+		appStore.showError(t('admin.accounts.openai.codexTicketTargetLengthInvalid'))
+		return
+	}
 
   const updatePayload: Record<string, unknown> = { ...form }
   try {
@@ -4898,10 +5235,10 @@ const handleSubmit = async () => {
 
       // 国产供应商：模式与协议写入凭据（决定额度/余额探测与转发端点/格式）。
       if (isCNApiKeyAccount.value) {
-        newCredentials.account_mode = editAccountMode.value
+        newCredentials.account_mode = currentOpenCodeOrCNMode()
         newCredentials.api_protocol = editApiProtocol.value
         if (editApiProtocol.value === 'adaptive') {
-          const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, editAccountMode.value)
+          const defaults = defaultCNAdaptiveBaseUrls(adaptivePresetPlatform.value, currentOpenCodeOrCNMode())
           const protocolBaseUrls: Record<string, string> = {}
           for (const item of editAdaptiveProtocolOptions.value) {
             protocolBaseUrls[item.value] = (editAdaptiveBaseUrls.value[item.value] || defaults[item.value]).trim()
@@ -4910,6 +5247,9 @@ const handleSubmit = async () => {
           newCredentials.base_url = protocolBaseUrls.chat_completions
         } else {
           delete newCredentials.api_base_urls
+        }
+        if (props.account.platform === 'opencode_go') {
+          applyOpenCodeGoProtocolRules(newCredentials, editOpenCodeGoProtocolRules.value, 'edit')
         }
         // 智谱团队版 Coding Plan：组织/项目 ID 写入凭据（非空才写，清空即移除回落个人版路径）
         if (props.account.platform === 'zhipu') {
@@ -5210,7 +5550,8 @@ const handleSubmit = async () => {
       updatePayload.extra = newExtra
     }
 
-    // OpenAI: 手动覆盖订阅档位 plan_type（Plus/Pro/Free）。仅 OAuth 非影子账号：
+    // OpenAI: 手动覆盖订阅档位 plan_type（Plus / Pro 20x / Pro 5x / Business Standard / Business Premium / Free）。
+    // 仅 OAuth 非影子账号：
     // 影子账号凭据由母账号管理(且后端会 sanitize),setup-token 无订阅调度语义。
     if (props.account.platform === 'openai' && props.account.type === 'oauth' && !isSparkShadow.value) {
       const currentCredentials = (updatePayload.credentials as Record<string, unknown>) ||
@@ -5482,6 +5823,23 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.codex_cli_only_allow_app_server
         }
+
+		newExtra.codex_ticket_target_mode = codexTicketTargetMode.value
+		if (codexTicketTargetMode.value === 'manual') {
+			newExtra.codex_ticket_target_length = Math.trunc(codexTicketTargetLength.value)
+		} else {
+			delete newExtra.codex_ticket_target_length
+		}
+		newExtra.codex_ticket_missing_policy = codexTicketMissingPolicy.value
+		for (const model of ['gpt-6-astra', 'gpt-5.6-sol']) {
+			const setting = codexTicketModelSettings[model]
+			newExtra[`codex_ticket_policy:${model}`] = {
+				enabled: setting.enabled,
+				codex_ticket_target_mode: setting.target_mode,
+				codex_ticket_target_length: Math.trunc(setting.target_length),
+				codex_ticket_missing_policy: setting.missing_policy,
+			}
+		}
       }
 
       // 指纹收敛模式：默认 off（不写入）；device/session/full 是显式 opt-in，

@@ -1184,6 +1184,7 @@
                           | 'all'
                           | 'priority'
                           | 'flex'
+                          | 'missing'
                       "
                       :options="openaiFastPolicyTierOptions"
                     />
@@ -4501,6 +4502,112 @@
               </h2>
             </div>
             <div class="p-6 space-y-4">
+                <div class="flex items-center justify-between gap-4">
+                  <div class="min-w-0">
+                    <h3 class="text-base font-semibold text-gray-900 dark:text-white">
+                      {{ t("admin.settings.gatewayForwarding.codexTicketEnabled") }}
+                    </h3>
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.gatewayForwarding.codexTicketEnabledDesc") }}
+                    </p>
+                  </div>
+                  <Toggle
+                    id="codex-ticket-enabled"
+                    v-model="form.openai_codex_ticket_enabled"
+                  />
+                </div>
+                <div>
+                  <h3 class="text-base font-semibold text-gray-900 dark:text-white">
+                    {{ t("admin.settings.gatewayForwarding.codexTicketHarvestProxy") }}
+                  </h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    {{ t("admin.settings.gatewayForwarding.codexTicketHarvestProxyDesc") }}
+                  </p>
+                  <input
+                    id="codex-ticket-harvest-proxy"
+                    v-model="form.openai_codex_ticket_harvest_proxy_url"
+                    type="text"
+                    class="input mt-3 w-full font-mono text-sm"
+                    :placeholder="t('admin.settings.gatewayForwarding.codexTicketHarvestProxyPlaceholder')"
+                    autocomplete="off"
+                  />
+                  <p
+                    v-if="form.openai_codex_ticket_harvest_proxy_configured"
+                    class="mt-1.5 text-xs text-gray-500 dark:text-gray-400"
+                  >
+                    {{ t("admin.settings.gatewayForwarding.codexTicketHarvestProxyConfigured") }}
+                  </p>
+                </div>
+                <div class="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label
+                      for="codex-ticket-miss-retry-seconds"
+                      class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                    >
+                      {{ t("admin.settings.gatewayForwarding.codexTicketMissRetrySeconds") }}
+                    </label>
+                    <input
+                      id="codex-ticket-miss-retry-seconds"
+                      v-model.number="form.openai_codex_ticket_miss_retry_seconds"
+                      type="number"
+                      min="1"
+                      max="86400"
+                      step="1"
+                      class="input w-full font-mono text-sm"
+                    />
+                    <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.gatewayForwarding.codexTicketMissRetrySecondsDesc") }}
+                    </p>
+                  </div>
+                  <div>
+                    <label
+                      for="codex-ticket-rate-limit-retry-seconds"
+                      class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                    >
+                      {{ t("admin.settings.gatewayForwarding.codexTicketRateLimitRetrySeconds") }}
+                    </label>
+                    <input
+                      id="codex-ticket-rate-limit-retry-seconds"
+                      v-model.number="form.openai_codex_ticket_rate_limit_retry_seconds"
+                      type="number"
+                      min="1"
+                      max="604800"
+                      step="1"
+                      class="input w-full font-mono text-sm"
+                    />
+                    <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.gatewayForwarding.codexTicketRateLimitRetrySecondsDesc") }}
+                    </p>
+                  </div>
+                </div>
+                <div class="grid gap-4 sm:grid-cols-2">
+                  <div v-for="model in codexTicketModels" :key="model.key" class="rounded-md border border-gray-200 p-4 dark:border-dark-600">
+                    <div class="flex items-center justify-between gap-3">
+                      <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t(`admin.settings.gatewayForwarding.${model.labelKey}`) }}</h3>
+                      <Toggle :id="`codex-ticket-model-${model.key}-enabled`" v-model="form.openai_codex_ticket_model_policies[model.key].enabled" />
+                    </div>
+                    <div class="mt-3 grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label class="input-label">{{ t("admin.settings.gatewayForwarding.codexTicketTargetMode") }}</label>
+                        <select v-model="form.openai_codex_ticket_model_policies[model.key].target_mode" class="input w-full">
+                          <option value="auto">{{ t("admin.settings.gatewayForwarding.codexTicketTargetAuto") }}</option>
+                          <option value="manual">{{ t("admin.settings.gatewayForwarding.codexTicketTargetManual") }}</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="input-label">{{ t("admin.settings.gatewayForwarding.codexTicketTargetLength") }}</label>
+                        <input v-model.number="form.openai_codex_ticket_model_policies[model.key].target_length" type="number" min="128" max="2048" class="input w-full" :disabled="form.openai_codex_ticket_model_policies[model.key].target_mode !== 'manual'" />
+                      </div>
+                    </div>
+                    <div class="mt-3">
+                      <label class="input-label">{{ t("admin.settings.gatewayForwarding.codexTicketMissingPolicy") }}</label>
+                      <select v-model="form.openai_codex_ticket_model_policies[model.key].missing_policy" class="input w-full">
+                        <option value="pause">{{ t("admin.settings.gatewayForwarding.codexTicketMissingPause") }}</option>
+                        <option value="allow">{{ t("admin.settings.gatewayForwarding.codexTicketMissingAllow") }}</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
                 <div>
                   <h3 class="text-base font-semibold text-gray-900 dark:text-white">
                     {{ t("admin.settings.gatewayForwarding.codexClientRestrictionTitle") }}
@@ -6763,6 +6870,17 @@
                     />
                   </div>
 
+                  <label class="flex items-center gap-2 sm:col-span-2">
+                    <input
+                      v-model="item.hide_open_button"
+                      type="checkbox"
+                      data-testid="custom-menu-hide-open-button"
+                    />
+                    <span class="text-sm text-gray-700 dark:text-gray-300">
+                      {{ t("admin.settings.customMenu.hideOpenButton") }}
+                    </span>
+                  </label>
+
                   <!-- SVG Icon (full width) -->
                   <div class="sm:col-span-2">
                     <label
@@ -7223,6 +7341,36 @@
                 rows="6"
                 class="input font-mono text-sm"
               ></textarea>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.settings.features.siteBillingMode.title') }}
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {{ t('admin.settings.features.siteBillingMode.description') }}
+            </p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div class="min-w-0">
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.features.siteBillingMode.label') }}
+                </label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ siteBillingModeHint }}
+                </p>
+              </div>
+              <div class="w-full shrink-0 sm:w-56">
+                <Select
+                  :modelValue="siteBillingMode"
+                  :options="siteBillingModeOptions"
+                  @update:modelValue="siteBillingMode = $event as SiteBillingMode"
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -8814,7 +8962,14 @@ import type {
 import type { ProviderInstance } from "@/types/payment";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import Icon from "@/components/icons/Icon.vue";
-import Select from "@/components/common/Select.vue";
+import Select, { type SelectOption } from "@/components/common/Select.vue";
+import {
+  SITE_BILLING_MODES,
+  SITE_BILLING_MODE_I18N_KEYS,
+  billingModeToSettings,
+  resolveSiteBillingMode,
+  type SiteBillingMode,
+} from "@/utils/siteBillingMode";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import PaymentProviderList from "@/components/payment/PaymentProviderList.vue";
 import PaymentProviderDialog from "@/components/payment/PaymentProviderDialog.vue";
@@ -9493,6 +9648,12 @@ type SettingsForm = Omit<
   | "wechat_connect_mp_enabled"
   | "wechat_connect_mobile_enabled"
 > & {
+  openai_codex_ticket_model_policies: Record<string, {
+    enabled: boolean
+    target_mode: 'auto' | 'manual'
+    target_length: number
+    missing_policy: 'pause' | 'allow'
+  }>
   /** Form always binds a concrete boolean (SystemSettings marks this optional). */
   channel_monitor_hide_throughput: boolean;
   channel_monitor_show_quota: boolean;
@@ -9538,6 +9699,11 @@ type SettingsForm = Omit<
 };
 
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
+
+const codexTicketModels = [
+  { key: 'gpt-6-astra', labelKey: 'codexTicketAstra' },
+  { key: 'gpt-5.6-sol', labelKey: 'codexTicketSol' },
+] as const
 
 const form = reactive<SettingsForm>({
   registration_enabled: true,
@@ -9617,6 +9783,7 @@ const form = reactive<SettingsForm>({
     url: string;
     visibility: "user" | "admin";
     sort_order: number;
+    hide_open_button?: boolean;
   }>,
   custom_endpoints: [] as Array<{
     name: string;
@@ -9791,6 +9958,15 @@ const form = reactive<SettingsForm>({
   // 只读展示：自动同步任务写入的官方最新稳定版，不参与提交（提交载荷按字段显式构造）
   openai_codex_client_version_synced: "",
   openai_codex_version_auto_sync_enabled: true,
+  openai_codex_ticket_enabled: false,
+  openai_codex_ticket_harvest_proxy_url: "",
+  openai_codex_ticket_harvest_proxy_configured: false,
+  openai_codex_ticket_miss_retry_seconds: 1800,
+  openai_codex_ticket_rate_limit_retry_seconds: 3600,
+  openai_codex_ticket_model_policies: {
+    'gpt-6-astra': { enabled: true, target_mode: 'auto', target_length: 332, missing_policy: 'allow' },
+    'gpt-5.6-sol': { enabled: true, target_mode: 'auto', target_length: 332, missing_policy: 'allow' },
+  },
   // codex_cli_only 加固
   min_codex_version: "",
   max_codex_version: "",
@@ -9814,6 +9990,8 @@ const form = reactive<SettingsForm>({
   channel_monitor_hide_user_ranking: false,
   // Available Channels feature switch
   available_channels_enabled: false,
+  // Subscription feature switch (user sidebar "My Subscriptions" entry)
+  subscription_enabled: true,
   // Model Plaza feature switches + description
   model_plaza_enabled: false,
   model_plaza_require_auth: false,
@@ -11021,6 +11199,24 @@ function findDuplicateDefaultSubscription(
   });
 }
 
+// 站点类型：由 subscription_enabled 与 payment_balance_disabled 两个开关派生的单选，
+// 保存时同时写回两者，避免出现「既无充值也无订阅」的组合。
+const siteBillingModeOptions = computed<SelectOption[]>(() =>
+  SITE_BILLING_MODES.map((mode) => ({
+    value: mode,
+    label: t(`admin.settings.features.siteBillingMode.options.${SITE_BILLING_MODE_I18N_KEYS[mode]}`),
+  })),
+);
+const siteBillingMode = computed<SiteBillingMode>({
+  get: () => resolveSiteBillingMode(form),
+  set: (mode) => {
+    Object.assign(form, billingModeToSettings(mode));
+  },
+});
+const siteBillingModeHint = computed(() =>
+  t(`admin.settings.features.siteBillingMode.hints.${SITE_BILLING_MODE_I18N_KEYS[siteBillingMode.value]}`),
+);
+
 async function saveSettings() {
   saving.value = true;
   try {
@@ -11377,6 +11573,14 @@ async function saveSettings() {
         form.openai_codex_client_version?.trim() || "",
       openai_codex_version_auto_sync_enabled:
         form.openai_codex_version_auto_sync_enabled,
+      openai_codex_ticket_enabled: form.openai_codex_ticket_enabled,
+      openai_codex_ticket_harvest_proxy_url:
+        form.openai_codex_ticket_harvest_proxy_url?.trim() || "",
+      openai_codex_ticket_miss_retry_seconds:
+        Number(form.openai_codex_ticket_miss_retry_seconds) || 1800,
+      openai_codex_ticket_rate_limit_retry_seconds:
+        Number(form.openai_codex_ticket_rate_limit_retry_seconds) || 3600,
+      openai_codex_ticket_model_policies: form.openai_codex_ticket_model_policies,
       min_codex_version: form.min_codex_version?.trim() || "",
       max_codex_version: form.max_codex_version?.trim() || "",
       codex_cli_only_allow_app_server_clients:
@@ -11478,6 +11682,8 @@ async function saveSettings() {
       channel_monitor_hide_user_ranking: Boolean(form.channel_monitor_hide_user_ranking),
       // Available Channels feature switch
       available_channels_enabled: form.available_channels_enabled,
+      // Subscription feature switch
+      subscription_enabled: form.subscription_enabled,
       // Model Plaza feature switches + description
       model_plaza_enabled: form.model_plaza_enabled,
       model_plaza_require_auth: form.model_plaza_require_auth,
@@ -12108,6 +12314,7 @@ const openaiFastPolicyTierOptions = computed(() => [
     label: t("admin.settings.openaiFastPolicy.tierUltrafast"),
   },
   { value: "flex", label: t("admin.settings.openaiFastPolicy.tierFlex") },
+  { value: "missing", label: t("admin.settings.openaiFastPolicy.tierMissing") },
 ]);
 
 const openaiFastPolicyActionOptions = computed(() => [

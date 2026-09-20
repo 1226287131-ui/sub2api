@@ -100,6 +100,7 @@ const (
 	upstreamProtocolModeOpenAIH1         = "openai_h1"
 	upstreamProtocolModeOpenAIH2         = "openai_h2"
 	upstreamProtocolModeOpenAIH1Fallback = "openai_h1_fallback"
+	upstreamProtocolModeOpenAIH1NoReuse  = "openai_h1_noreuse"
 	upstreamProtocolModeGrok             = "grok"
 )
 
@@ -206,10 +207,28 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	if req != nil {
 		profile = service.HTTPUpstreamProfileFromContext(req.Context())
 	}
+	if req != nil && service.AccountProxyPoolEligible(req.Context()) && !service.AccountProxyPoolResolved(req.Context()) {
+		proxyURL = service.ResolveAccountProxyPoolURL(accountID, proxyURL)
+	}
+	proxyURL, _, laneConcurrency, laneTimeout, releaseLane, laneErr := service.AcquireAccountProxyLaneForURL(accountID, proxyURL)
+	if laneErr != nil {
+		return nil, laneErr
+	}
+	if laneConcurrency > 0 {
+		accountConcurrency = laneConcurrency
+	}
+	cancelLaneTimeout := func() {}
+	if req != nil && laneTimeout > 0 {
+		laneCtx, cancel := context.WithTimeout(req.Context(), time.Duration(laneTimeout)*time.Second)
+		req = req.Clone(laneCtx)
+		cancelLaneTimeout = cancel
+	}
 
 	// 获取或创建对应的客户端，并标记请求占用
 	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
 	if err != nil {
+		releaseLane(false)
+		cancelLaneTimeout()
 		return nil, err
 	}
 
@@ -222,6 +241,8 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 		// 请求失败，立即减少计数
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(false)
+		cancelLaneTimeout()
 		return nil, err
 	}
 	s.recordOpenAIHTTP2Success(profile, entry.protocolMode, entry.proxyKey)
@@ -234,6 +255,8 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	resp.Body = wrapTrackedBody(resp.Body, func() {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusTooManyRequests)
+		cancelLaneTimeout()
 	})
 
 	return resp, nil
@@ -257,6 +280,22 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	if req != nil {
 		upstreamProfile = service.HTTPUpstreamProfileFromContext(req.Context())
 	}
+	if req != nil && service.AccountProxyPoolEligible(req.Context()) && !service.AccountProxyPoolResolved(req.Context()) {
+		proxyURL = service.ResolveAccountProxyPoolURL(accountID, proxyURL)
+	}
+	proxyURL, _, laneConcurrency, laneTimeout, releaseLane, laneErr := service.AcquireAccountProxyLaneForURL(accountID, proxyURL)
+	if laneErr != nil {
+		return nil, laneErr
+	}
+	if laneConcurrency > 0 {
+		accountConcurrency = laneConcurrency
+	}
+	cancelLaneTimeout := func() {}
+	if req != nil && laneTimeout > 0 {
+		laneCtx, cancel := context.WithTimeout(req.Context(), time.Duration(laneTimeout)*time.Second)
+		req = req.Clone(laneCtx)
+		cancelLaneTimeout = cancel
+	}
 
 	targetHost := ""
 	if req != nil && req.URL != nil {
@@ -269,11 +308,15 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	slog.Debug("tls_fingerprint_enabled", "account_id", accountID, "target", targetHost, "proxy", proxyInfo, "profile", profile.Name)
 
 	if err := s.validateRequestHost(req); err != nil {
+		releaseLane(false)
+		cancelLaneTimeout()
 		return nil, err
 	}
 
 	entry, err := s.acquireClientWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile)
 	if err != nil {
+		releaseLane(false)
+		cancelLaneTimeout()
 		slog.Debug("tls_fingerprint_acquire_client_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
@@ -284,6 +327,8 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(false)
+		cancelLaneTimeout()
 		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
@@ -293,6 +338,8 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	resp.Body = wrapTrackedBody(resp.Body, func() {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusTooManyRequests)
+		cancelLaneTimeout()
 	})
 
 	return resp, nil
@@ -1014,6 +1061,9 @@ func (s *httpUpstreamService) resolveProtocolMode(profile service.HTTPUpstreamPr
 	if profile == service.HTTPUpstreamProfileGrok {
 		return upstreamProtocolModeGrok
 	}
+	if profile == service.HTTPUpstreamProfileOpenAIHarvest {
+		return upstreamProtocolModeOpenAIH1NoReuse
+	}
 	if profile != service.HTTPUpstreamProfileOpenAI {
 		return upstreamProtocolModeDefault
 	}
@@ -1345,6 +1395,13 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		}
 	case upstreamProtocolModeOpenAIH1:
 		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	case upstreamProtocolModeOpenAIH1NoReuse:
+		// Harvest must open a fresh CONNECT each attempt so the harvest proxy can rotate egress IPs.
+		transport.ForceAttemptHTTP2 = false
+		transport.DisableKeepAlives = true
+		transport.MaxIdleConns = 0
+		transport.MaxIdleConnsPerHost = 0
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	case upstreamProtocolModeOpenAIH1Fallback:
 		// 显式禁用 HTTP/2，确保代理不兼容场景回退到 HTTP/1.1。

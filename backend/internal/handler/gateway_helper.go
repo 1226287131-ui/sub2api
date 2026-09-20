@@ -490,7 +490,7 @@ func (h *ConcurrencyHelper) AcquireAnyAccountSlotWithWaitTimeout(
 		}
 		seen[candidate.Account.ID] = struct{}{}
 		if candidate.MaxConcurrency == 0 {
-			candidate.MaxConcurrency = candidate.Account.Concurrency
+			candidate.MaxConcurrency = candidate.Account.EffectiveConcurrency()
 		}
 		ordered = append(ordered, candidate)
 		if len(ordered) >= maxDynamicAccountWaitCandidates {

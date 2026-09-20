@@ -252,6 +252,9 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		Extra:                   extra,
 		OllamaCloudUsage:        ollamaCloudUsage,
 		ProxyID:                 a.ProxyID,
+		ProxyPoolIDs:            service.AccountProxyPoolIDs(a.Extra),
+		ProxyLaneConfigs:        a.ProxyLaneConfigs(),
+		ProxyLaneStrategy:       service.ProxyLaneStrategy(a.Extra),
 		ProxyFallbackOriginID:   a.ProxyFallbackOriginID,
 		ProxyFallbackOriginName: a.ProxyFallbackOriginName,
 		Concurrency:             a.Concurrency,
@@ -277,6 +280,12 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		GroupIDs:                a.GroupIDs,
 		ParentAccountID:         a.ParentAccountID,
 		QuotaDimension:          a.QuotaDimension,
+	}
+	if len(a.ProxyPool) > 0 {
+		out.ProxyPool = make([]*Proxy, 0, len(a.ProxyPool))
+		for _, proxy := range a.ProxyPool {
+			out.ProxyPool = append(out.ProxyPool, ProxyFromService(proxy))
+		}
 	}
 
 	// 提取 5h 窗口费用控制和会话数量控制配置（仅 Anthropic OAuth/SetupToken 账号有效）
@@ -414,10 +423,12 @@ func redactAccountManagedExtra(extra map[string]any) map[string]any {
 	}
 	redacted := make(map[string]any, len(extra))
 	for key, value := range extra {
-		switch key {
-		case service.OllamaCloudUsageSessionExtraKey,
-			service.OllamaCloudUsageAutoRefreshExtraKey,
-			service.OllamaCloudUsageSnapshotExtraKey:
+		switch {
+		case key == service.OllamaCloudUsageSessionExtraKey,
+			key == service.OllamaCloudUsageAutoRefreshExtraKey,
+			key == service.OllamaCloudUsageSnapshotExtraKey:
+			continue
+		case service.IsOpenAICodexTicketPrivateExtraKey(key):
 			continue
 		default:
 			redacted[key] = value
@@ -458,8 +469,10 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 	return &AccountListItem{
 		ID: a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
 		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: a.Extra,
-		OllamaCloudUsage: a.OllamaCloudUsage,
-		ProxyID:          a.ProxyID, ProxyFallbackOriginID: a.ProxyFallbackOriginID, ProxyFallbackOriginName: a.ProxyFallbackOriginName,
+		OllamaCloudUsage: a.OllamaCloudUsage, CodexTurnTickets: a.CodexTurnTickets,
+		ProxyID: a.ProxyID, ProxyPoolIDs: a.ProxyPoolIDs, ProxyPool: a.ProxyPool,
+		ProxyLaneConfigs: a.ProxyLaneConfigs, ProxyLaneStrategy: a.ProxyLaneStrategy,
+		ProxyFallbackOriginID: a.ProxyFallbackOriginID, ProxyFallbackOriginName: a.ProxyFallbackOriginName,
 		Concurrency: a.Concurrency, LoadFactor: a.LoadFactor, Priority: a.Priority, RateMultiplier: a.RateMultiplier,
 		Status: a.Status, ErrorMessage: a.ErrorMessage, LastUsedAt: a.LastUsedAt, ExpiresAt: a.ExpiresAt,
 		AutoPauseOnExpired: a.AutoPauseOnExpired, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,

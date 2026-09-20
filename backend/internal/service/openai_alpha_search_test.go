@@ -324,45 +324,64 @@ func TestForwardAlphaSearchReturnsFailoverBeforeWriting(t *testing.T) {
 	require.Empty(t, recorder.Body.String())
 }
 
-func TestForwardAlphaSearchSetupToken429CarriesSameAccountRetryWindow(t *testing.T) {
+func TestForwardAlphaSearchSetupToken429RetryPolicy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{}}`)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", bytes.NewReader(body))
+	for _, tc := range []struct {
+		name       string
+		retryAfter string
+		wantRetry  bool
+	}{
+		{name: "transient_without_cooldown", wantRetry: true},
+		{name: "explicit_cooldown", retryAfter: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{}}`)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", bytes.NewReader(body))
 
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusTooManyRequests,
-		Header: http.Header{
-			"Content-Type": []string{"application/json"},
-			"Retry-After":  []string{"1"},
-			"X-Request-Id": []string{"req_alpha_oauth_429"},
-		},
-		Body: io.NopCloser(strings.NewReader(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limited"}}`)),
-	}}
-	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
-	account := &Account{
-		ID:          81,
-		Platform:    PlatformOpenAI,
-		Type:        AccountTypeSetupToken,
-		Concurrency: 1,
-		Credentials: map[string]any{
-			"access_token":       "oauth-token",
-			"chatgpt_account_id": "chatgpt-account",
-		},
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header: http.Header{
+					"Content-Type": []string{"application/json"},
+					"X-Request-Id": []string{"req_alpha_oauth_429"},
+				},
+				Body: io.NopCloser(strings.NewReader(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limited"}}`)),
+			}}
+			if tc.retryAfter != "" {
+				upstream.resp.Header.Set("Retry-After", tc.retryAfter)
+			}
+			service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			account := &Account{
+				ID:          81,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeSetupToken,
+				Concurrency: 1,
+				Credentials: map[string]any{
+					"access_token":       "oauth-token",
+					"chatgpt_account_id": "chatgpt-account",
+				},
+			}
+			startedAt := time.Now()
+
+			result, err := service.ForwardAlphaSearch(context.Background(), c, account, body)
+
+			require.Nil(t, result)
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.Equal(t, tc.wantRetry, failoverErr.RetryableOnSameAccount)
+			if tc.wantRetry {
+				require.Equal(t, openAIOAuth429RetryDelay, failoverErr.SameAccountRetryDelay)
+				require.WithinDuration(t, startedAt.Add(openAIOAuth429RetryWindow), failoverErr.SameAccountRetryDeadline, time.Second)
+			} else {
+				require.Zero(t, failoverErr.SameAccountRetryDelay)
+				require.True(t, failoverErr.SameAccountRetryDeadline.IsZero())
+			}
+			require.Equal(t, tc.retryAfter, failoverErr.ResponseHeaders.Get("Retry-After"))
+			require.Equal(t, "req_alpha_oauth_429", failoverErr.ResponseHeaders.Get("x-request-id"))
+			require.False(t, c.Writer.Written())
+		})
 	}
-	startedAt := time.Now()
-
-	result, err := service.ForwardAlphaSearch(context.Background(), c, account, body)
-
-	require.Nil(t, result)
-	var failoverErr *UpstreamFailoverError
-	require.ErrorAs(t, err, &failoverErr)
-	require.True(t, failoverErr.RetryableOnSameAccount)
-	require.Equal(t, time.Second, failoverErr.SameAccountRetryDelay)
-	require.WithinDuration(t, startedAt.Add(openAIOAuth429RetryWindow), failoverErr.SameAccountRetryDeadline, time.Second)
-	require.Equal(t, "req_alpha_oauth_429", failoverErr.ResponseHeaders.Get("x-request-id"))
-	require.False(t, c.Writer.Written())
 }
 
 func TestForwardAlphaSearchAccessStateUsesTypedFailover(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,26 +22,28 @@ type helperConcurrencyCacheStub struct {
 	accountSeq []bool
 	userSeq    []bool
 
-	accountAcquireCalls int
-	userAcquireCalls    int
-	accountReleaseCalls int
-	userReleaseCalls    int
-	waitAllowed         bool
-	waitIncrementCalls  int
-	waitDecrementCalls  int
-	waitIncrementIDs    []int64
-	waitDecrementIDs    []int64
-	waitMaxWait         int
-	waitIncrementHook   func()
-	apiKeyTrackCalls    int
-	apiKeyReleaseCalls  int
-	apiKeyTrackIDs      []int64
+	accountAcquireCalls  int
+	accountAcquireLimits []int
+	userAcquireCalls     int
+	accountReleaseCalls  int
+	userReleaseCalls     int
+	waitAllowed          bool
+	waitIncrementCalls   int
+	waitDecrementCalls   int
+	waitIncrementIDs     []int64
+	waitDecrementIDs     []int64
+	waitMaxWait          int
+	waitIncrementHook    func()
+	apiKeyTrackCalls     int
+	apiKeyReleaseCalls   int
+	apiKeyTrackIDs       []int64
 }
 
 func (s *helperConcurrencyCacheStub) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.accountAcquireCalls++
+	s.accountAcquireLimits = append(s.accountAcquireLimits, maxConcurrency)
 	if len(s.accountSeq) == 0 {
 		return false, nil
 	}
@@ -534,6 +537,35 @@ func TestAcquireAnyAccountSlotWithWaitTimeoutUsesAlternateAccount(t *testing.T) 
 	require.Equal(t, 1, cache.waitDecrementCalls, "the reserved queue position must be released exactly once")
 	require.Equal(t, []int64{401}, cache.waitIncrementIDs)
 	require.Equal(t, []int64{401}, cache.waitDecrementIDs)
+}
+
+func TestAcquireAnyAccountSlotUsesProxyLaneCapacityAndStopsAtWinner(t *testing.T) {
+	cache := &helperConcurrencyCacheStub{accountSeq: []bool{true, true}}
+	helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second)
+	c, _ := newHelperTestContext(http.MethodPost, "/v1/responses")
+	proxyID := int64(51)
+	account := &service.Account{
+		ID: 501, Concurrency: 1, ProxyID: &proxyID,
+		Extra: map[string]any{
+			service.AccountProxyPoolIDsExtraKey: []int64{52},
+			service.AccountProxyLaneConfigsExtraKey: []service.ProxyLaneConfig{
+				{ProxyID: 51, Enabled: true, MaxConcurrency: 2},
+				{ProxyID: 52, Enabled: true, MaxConcurrency: 3},
+			},
+		},
+	}
+	selectedID, release, err := helper.AcquireAnyAccountSlotWithWaitTimeout(c, []service.AccountWaitCandidate{
+		{Account: account},
+		{Account: &service.Account{ID: 502, Concurrency: 1}},
+	}, time.Second, 2, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int64(501), selectedID)
+	require.NotNil(t, release)
+	release()
+	assert.Equal(t, []int{5}, cache.accountAcquireLimits)
+	assert.Equal(t, 1, cache.accountAcquireCalls, "only the winning slot may be acquired")
+	assert.Equal(t, 1, cache.accountReleaseCalls)
+	assert.Zero(t, cache.waitIncrementCalls)
 }
 
 type helperConcurrencyCacheStubWithError struct {

@@ -191,6 +191,7 @@ export interface CustomMenuItem {
   icon_svg: string
   url: string
   page_slug?: string
+  hide_open_button?: boolean
   visibility: 'user' | 'admin'
   sort_order: number
 }
@@ -276,6 +277,10 @@ export interface PublicSettings {
   /** When true, user monitor hides the user ranking tab and /users payload. */
   channel_monitor_hide_user_ranking?: boolean
   available_channels_enabled: boolean
+  /** When false, the whole user-facing subscription surface is hidden. Default true. */
+  subscription_enabled: boolean
+  /** Mirrors payment config BALANCE_PAYMENT_DISABLED; true = balance top-up closed (subscription-only site). */
+  payment_balance_disabled: boolean
   model_plaza_enabled: boolean
   model_plaza_require_auth: boolean
   plugin_management_enabled: boolean
@@ -533,7 +538,7 @@ export interface PaginationConfig {
 
 // ==================== API Key & Group Types ====================
 
-export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'minimax' | 'composite'
+export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'minimax' | 'opencode_go' | 'composite'
 
 export type VideoModelPrices = Record<string, Record<string, number>>
 
@@ -913,7 +918,7 @@ export interface UpdateGroupRequest {
 
 // ==================== Account & Proxy Types ====================
 
-export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'minimax'
+export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'minimax' | 'opencode_go'
 export type AccountType = 'oauth' | 'setup-token' | 'apikey' | 'upstream' | 'bedrock' | 'service_account'
 export type OAuthAddMethod = 'oauth' | 'setup-token'
 export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'socks5h'
@@ -955,6 +960,29 @@ export interface Proxy {
   expiry_warn_days: number
   created_at: string
   updated_at: string
+}
+
+export type ProxyLaneStrategy = 'round_robin' | 'least_connections' | 'weighted'
+
+export interface ProxyLaneConfig {
+  proxy_id: number
+  enabled: boolean
+  max_concurrency: number
+  weight: number
+  timeout_seconds: number
+  error_circuit_threshold: number
+  circuit_cooldown_seconds: number
+  fallback_order: number
+}
+
+export interface ProxyLaneStatus extends ProxyLaneConfig {
+  name: string
+  primary: boolean
+  healthy: boolean
+  current_concurrency: number
+  circuit_open_until?: string | null
+  status: 'active' | 'inactive' | 'expired'
+  expires_at?: string | null
 }
 
 export interface ProxyAccountSummary {
@@ -1163,6 +1191,25 @@ export interface Account {
   credentials?: Record<string, unknown>
   credentials_status?: Record<string, boolean>
   ollama_cloud_usage?: OllamaCloudUsageState
+  codex_turn_tickets?: Array<{
+    model: string
+    length?: number
+    observed_length?: number
+    observed_http_status?: number
+    observed_at?: string
+    next_probe_at?: string
+    observation_outcome?: string
+    ticket_type: 'target' | 'non_target' | 'missing' | 'expired' | 'rate_limited' | 'quota_exhausted' | 'error' | 'http_error' | 'token_error' | 'disabled'
+    target_length: number
+    target_mode: 'auto' | 'manual'
+    target_source: 'auto_business' | 'auto_personal' | 'manual' | 'global_default'
+    missing_policy: 'pause' | 'allow'
+    plan_type?: string
+    ready: boolean
+    remaining_seconds: number
+    blocked: boolean
+    expires_at?: string
+  }>
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {
     model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
@@ -1187,6 +1234,12 @@ export interface Account {
     }
   } & Record<string, unknown>)
   proxy_id: number | null
+  proxy_pool_ids?: number[]
+  proxy_pool?: Proxy[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
+  proxy_lanes?: ProxyLaneStatus[]
+  effective_concurrency?: number
   proxy_fallback_origin_id?: number | null
   proxy_fallback_origin_name?: string | null
   concurrency: number
@@ -1450,7 +1503,7 @@ export interface CodexUsageSnapshot {
 
 export type OpenAICompactMode = 'auto' | 'force_on' | 'force_off'
 export type OpenAIResponsesMode = 'auto' | 'force_responses' | 'force_chat_completions'
-export type OpenAIEndpointCapability = 'chat_completions' | 'embeddings'
+export type OpenAIEndpointCapability = 'chat_completions' | 'embeddings' | 'seedance'
 
 export interface OpenAICompactState {
   openai_compact_mode?: OpenAICompactMode
@@ -1473,6 +1526,9 @@ export interface CreateAccountRequest {
   credentials: Record<string, unknown>
   extra?: Record<string, unknown>
   proxy_id?: number | null
+  proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   load_factor?: number | null
   priority?: number
@@ -1491,6 +1547,9 @@ export interface UpdateAccountRequest {
   credentials?: Record<string, unknown>
   extra?: Record<string, unknown>
   proxy_id?: number | null
+  proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   load_factor?: number | null
   priority?: number
@@ -1590,6 +1649,9 @@ export interface AdminDataAccount {
   credentials: Record<string, unknown>
   extra?: Record<string, unknown>
   proxy_key?: string | null
+  proxy_pool_keys?: string[]
+  proxy_lane_configs?: Array<Omit<ProxyLaneConfig, 'proxy_id'> & { proxy_key: string }>
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency: number
   priority: number
   rate_multiplier?: number | null
@@ -1610,7 +1672,36 @@ export interface AdminDataImportResult {
   proxy_failed: number
   account_created: number
   account_failed: number
+  proxy_assigned?: number
+  proxy_assign_failed?: number
+  post_import_updated?: number
+  post_import_failed?: number
   errors?: AdminDataImportError[]
+}
+
+export interface SmartProxyAssignmentOptions {
+  enabled?: boolean
+  proxy_count: number
+  test_latency: boolean
+  prefer_low_latency: boolean
+  low_latency_limit: number
+  weighted_by_load: boolean
+}
+
+export interface SmartProxyAssignmentItem {
+  account_id: number
+  success: boolean
+  primary_proxy_id?: number
+  proxy_pool_ids?: number[]
+  error?: string
+}
+
+export interface SmartProxyAssignmentResult {
+  success: number
+  failed: number
+  tested_proxies: number
+  available_proxies: number
+  items: SmartProxyAssignmentItem[]
 }
 
 export interface CodexSessionImportRequest {
@@ -1620,6 +1711,9 @@ export interface CodexSessionImportRequest {
   notes?: string | null
   group_ids?: number[]
   proxy_id?: number | null
+  proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   priority?: number
   rate_multiplier?: number
@@ -1639,6 +1733,9 @@ export interface OpenAICodexPATCreateRequest {
   notes?: string | null
   group_ids?: number[]
   proxy_id?: number | null
+  proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   priority?: number
   rate_multiplier?: number

@@ -37,14 +37,15 @@ type dataProxy struct {
 }
 
 type dataAccount struct {
-	Name        string         `json:"name"`
-	Platform    string         `json:"platform"`
-	Type        string         `json:"type"`
-	Credentials map[string]any `json:"credentials"`
-	Extra       map[string]any `json:"extra"`
-	ProxyKey    *string        `json:"proxy_key"`
-	Concurrency int            `json:"concurrency"`
-	Priority    int            `json:"priority"`
+	Name          string         `json:"name"`
+	Platform      string         `json:"platform"`
+	Type          string         `json:"type"`
+	Credentials   map[string]any `json:"credentials"`
+	Extra         map[string]any `json:"extra"`
+	ProxyKey      *string        `json:"proxy_key"`
+	ProxyPoolKeys []string       `json:"proxy_pool_keys"`
+	Concurrency   int            `json:"concurrency"`
+	Priority      int            `json:"priority"`
 }
 
 func setupAccountDataRouter() (*gin.Engine, *stubAdminService) {
@@ -172,6 +173,30 @@ func TestExportDataWithoutProxies(t *testing.T) {
 	require.Len(t, resp.Data.Proxies, 0)
 	require.Len(t, resp.Data.Accounts, 1)
 	require.Nil(t, resp.Data.Accounts[0].ProxyKey)
+}
+
+func TestExportDataIncludesProxyPool(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	primaryID := int64(11)
+	poolID := int64(12)
+	adminSvc.proxies = []service.Proxy{
+		{ID: primaryID, Name: "primary", Protocol: "http", Host: "127.0.0.1", Port: 8080, Status: service.StatusActive},
+		{ID: poolID, Name: "pool", Protocol: "socks5", Host: "127.0.0.2", Port: 1080, Status: service.StatusActive},
+	}
+	adminSvc.accounts = []service.Account{{
+		ID: 21, Name: "account", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "secret"}, ProxyID: &primaryID,
+		Extra: map[string]any{service.AccountProxyPoolIDsExtraKey: []any{float64(poolID)}},
+	}}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/data", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp dataResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Proxies, 2)
+	require.Len(t, resp.Data.Accounts, 1)
+	require.Equal(t, []string{"socks5|127.0.0.2|1080||"}, resp.Data.Accounts[0].ProxyPoolKeys)
 }
 
 // TestExportDataExcludesSparkShadow 验证外审第5轮 P1/P2:导出时排除 spark 影子账号
@@ -316,4 +341,134 @@ func TestImportDataReusesProxyAndSkipsDefaultGroup(t *testing.T) {
 	require.Len(t, adminSvc.createdProxies, 0)
 	require.Len(t, adminSvc.createdAccounts, 1)
 	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
+}
+
+func TestImportDataRestoresProxyPoolKeys(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	adminSvc.proxies = []service.Proxy{
+		{ID: 1, Name: "primary", Protocol: "http", Host: "1.2.3.4", Port: 8080, Status: service.StatusActive},
+		{ID: 2, Name: "pool", Protocol: "socks5", Host: "5.6.7.8", Port: 1080, Status: service.StatusActive},
+	}
+	payload := map[string]any{"data": map[string]any{
+		"type": dataType, "version": dataVersion,
+		"proxies": []map[string]any{
+			{"proxy_key": "http|1.2.3.4|8080||", "name": "primary", "protocol": "http", "host": "1.2.3.4", "port": 8080, "status": "active"},
+			{"proxy_key": "socks5|5.6.7.8|1080||", "name": "pool", "protocol": "socks5", "host": "5.6.7.8", "port": 1080, "status": "active"},
+		},
+		"accounts": []map[string]any{{
+			"name": "acc", "platform": service.PlatformOpenAI, "type": service.AccountTypeAPIKey,
+			"credentials": map[string]any{"api_key": "x"}, "proxy_key": "http|1.2.3.4|8080||",
+			"proxy_pool_keys": []string{"socks5|5.6.7.8|1080||"}, "concurrency": 3, "priority": 50,
+		}},
+	}}
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	require.Equal(t, []int64{2}, adminSvc.createdAccounts[0].ProxyPoolIDs)
+}
+
+func TestImportDataSmartAssignsCreatedAccounts(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	adminSvc.proxyCounts = []service.ProxyWithAccountCount{
+		{Proxy: service.Proxy{ID: 1, Protocol: "http", Host: "127.0.0.1", Port: 8001, Status: service.StatusActive}},
+		{Proxy: service.Proxy{ID: 2, Protocol: "http", Host: "127.0.0.1", Port: 8002, Status: service.StatusActive}},
+	}
+	payload := map[string]any{
+		"data": map[string]any{
+			"type": dataType, "version": dataVersion, "proxies": []any{},
+			"accounts": []map[string]any{{
+				"name": "acc", "platform": service.PlatformOpenAI, "type": service.AccountTypeAPIKey,
+				"credentials": map[string]any{"api_key": "x"}, "concurrency": 3, "priority": 50,
+			}},
+		},
+		"smart_proxy_assignment": map[string]any{
+			"enabled": true, "proxy_count": 2, "test_latency": true,
+			"prefer_low_latency": true, "weighted_by_load": true,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var responseBody struct {
+		Data DataImportResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &responseBody))
+	require.Equal(t, 1, responseBody.Data.ProxyAssigned)
+	require.Zero(t, responseBody.Data.ProxyAssignFailed)
+	require.Equal(t, 1, adminSvc.updateAccountCalls)
+	require.NotNil(t, adminSvc.lastUpdateAccountInput.ProxyID)
+	require.Len(t, *adminSvc.lastUpdateAccountInput.ProxyPoolIDs, 1)
+}
+
+func TestImportDataAppliesPostImportBulkUpdatesOnlyToCreatedAccounts(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	concurrency := 7
+	priority := 12
+	schedulable := true
+	payload := map[string]any{
+		"data": map[string]any{
+			"type": dataType, "version": dataVersion, "proxies": []any{},
+			"accounts": []map[string]any{{
+				"name": "acc", "platform": service.PlatformOpenAI, "type": service.AccountTypeAPIKey,
+				"credentials": map[string]any{"api_key": "x"}, "concurrency": 3, "priority": 50,
+			}},
+		},
+		"post_import_updates": map[string]any{
+			// These caller-supplied target selectors must be ignored.
+			"account_ids": []int64{999999},
+			"filters":     map[string]any{"platform": "anthropic"},
+			"concurrency": concurrency,
+			"priority":    priority,
+			"schedulable": schedulable,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var responseBody struct {
+		Data DataImportResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &responseBody))
+	require.Equal(t, 1, responseBody.Data.PostImportUpdated)
+	require.Zero(t, responseBody.Data.PostImportFailed)
+	require.NotNil(t, adminSvc.lastBulkUpdateAccountInput)
+	require.Equal(t, []int64{300}, adminSvc.lastBulkUpdateAccountInput.AccountIDs)
+	require.Nil(t, adminSvc.lastBulkUpdateAccountInput.Filters)
+	require.Equal(t, concurrency, *adminSvc.lastBulkUpdateAccountInput.Concurrency)
+	require.Equal(t, priority, *adminSvc.lastBulkUpdateAccountInput.Priority)
+	require.Equal(t, schedulable, *adminSvc.lastBulkUpdateAccountInput.Schedulable)
+}
+
+func TestExportDataExcludesCodexTicketMaterial(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	extra := map[string]any{
+		"codex_turn_ticket:gpt-6-astra": map[string]any{"state": "private-ticket-blob", "length": 292},
+		"codex_harvest_proxy_url":       "http://user:legacy-proxy-secret@proxy.example.com:8080",
+		"ordinary":                      "retained",
+	}
+	adminSvc.accounts = []service.Account{{ID: 21, Name: "account", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: map[string]any{"access_token": "backup-token"}, Extra: extra}}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/data?include_proxies=false", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp dataResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Accounts, 1)
+	require.Equal(t, map[string]any{"ordinary": "retained"}, resp.Data.Accounts[0].Extra)
+	require.Equal(t, "backup-token", resp.Data.Accounts[0].Credentials["access_token"])
+	require.NotContains(t, rec.Body.String(), "private-ticket-blob")
+	require.NotContains(t, rec.Body.String(), "legacy-proxy-secret")
+	require.Contains(t, extra, "codex_turn_ticket:gpt-6-astra")
+	require.Contains(t, extra, "codex_harvest_proxy_url")
 }

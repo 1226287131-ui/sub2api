@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,14 +80,18 @@ func TestOpenAISelectionWaitPlanIncludesAlternateAccounts(t *testing.T) {
 			acquireResults: map[int64]bool{9031: false, 9032: false},
 		}),
 	}
+	svc.cfg.Gateway.Scheduling.LoadBatchEnabled = true
 
 	selection, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, "", "gpt-5.1", nil)
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.WaitPlan)
 	require.Len(t, selection.WaitPlan.Candidates, 2)
-	require.Equal(t, int64(9031), selection.WaitPlan.Candidates[0].Account.ID)
-	require.Equal(t, int64(9032), selection.WaitPlan.Candidates[1].Account.ID)
+	assert.ElementsMatch(t, []int64{9031, 9032}, []int64{
+		selection.WaitPlan.Candidates[0].Account.ID,
+		selection.WaitPlan.Candidates[1].Account.ID,
+	})
+	assert.Equal(t, selection.WaitPlan.Candidates[0].Account.ID, selection.WaitPlan.AccountID)
 }
 
 func accountIDsFromWaitOrder(order []openAIAccountCandidateScore) []int64 {
@@ -2252,7 +2257,7 @@ func TestOpenAIGatewayService_RecheckSelectedOpenAIAccountFromDB_SimpleModeUsesF
 	requestedGroupID := int64(100)
 
 	for _, groupID := range []*int64{nil, &requestedGroupID} {
-		fresh := svc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, groupID, PlatformOpenAI, "gpt-5.1", false, "")
+		fresh := svc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, groupID, PlatformOpenAI, "gpt-5.1", false, true, "")
 		require.NotNil(t, fresh)
 		require.Equal(t, grouped.ID, fresh.ID)
 	}
@@ -2265,8 +2270,8 @@ func TestOpenAIGatewayService_RecheckSelectedOpenAIAccountFromDB_SimpleModeUsesF
 		cfg:               &config.Config{RunMode: config.RunModeStandard},
 		schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{}},
 	}
-	require.Nil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, nil, PlatformOpenAI, "gpt-5.1", false, ""))
-	require.NotNil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &ungrouped, nil, PlatformOpenAI, "gpt-5.1", false, ""))
+	require.Nil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, nil, PlatformOpenAI, "gpt-5.1", false, true, ""))
+	require.NotNil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &ungrouped, nil, PlatformOpenAI, "gpt-5.1", false, true, ""))
 }
 
 func TestOpenAIGatewayService_SelectAccountWithScheduler_PreviousResponseSticky(t *testing.T) {

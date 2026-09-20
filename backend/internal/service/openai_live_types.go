@@ -53,6 +53,7 @@ type LiveCallRecord struct {
 	CallID          string
 	CallHash        string
 	AccountID       int64
+	ProxyID         int64
 	APIKeyID        int64
 	UserID          int64
 	GroupID         int64
@@ -74,6 +75,7 @@ type LiveCallCreated struct {
 	SDP      []byte
 	CallID   string
 	Location string
+	ProxyID  int64
 	Account  *Account
 }
 

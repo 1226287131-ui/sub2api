@@ -130,9 +130,14 @@ type proxyProbeIdentity struct {
 	username string
 	password string
 	status   string
+	expires  sql.NullTime
 }
 
 func proxyProbeIdentityFromService(proxyIn *service.Proxy) proxyProbeIdentity {
+	expires := sql.NullTime{}
+	if proxyIn.ExpiresAt != nil {
+		expires = sql.NullTime{Time: *proxyIn.ExpiresAt, Valid: true}
+	}
 	return proxyProbeIdentity{
 		protocol: proxyIn.Protocol,
 		host:     proxyIn.Host,
@@ -140,6 +145,7 @@ func proxyProbeIdentityFromService(proxyIn *service.Proxy) proxyProbeIdentity {
 		username: proxyIn.Username,
 		password: proxyIn.Password,
 		status:   proxyIn.Status,
+		expires:  expires,
 	}
 }
 
@@ -184,22 +190,36 @@ func updateProxyAndInvalidateProbeSnapshots(ctx context.Context, client *dbent.C
 	if err != nil {
 		return nil, err
 	}
-	if currentIdentity == proxyProbeIdentityFromService(proxyIn) {
+	if proxyProbeIdentitiesEqual(currentIdentity, proxyProbeIdentityFromService(proxyIn)) {
 		return updated, nil
 	}
 	accountIDs, err := invalidateProxyProbeSnapshots(ctx, client, proxyIn.ID)
 	if err != nil {
 		return nil, err
 	}
+	referencingAccountIDs, err := accountIDsReferencingProxyPool(ctx, client, proxyIn.ID)
+	if err != nil {
+		return nil, err
+	}
+	accountIDs = append(accountIDs, referencingAccountIDs...)
 	if err := enqueueProxyProbeAccountChanges(ctx, client, accountIDs); err != nil {
 		return nil, err
 	}
 	return updated, nil
 }
 
+func proxyProbeIdentitiesEqual(left, right proxyProbeIdentity) bool {
+	if left.protocol != right.protocol || left.host != right.host || left.port != right.port ||
+		left.username != right.username || left.password != right.password || left.status != right.status ||
+		left.expires.Valid != right.expires.Valid {
+		return false
+	}
+	return !left.expires.Valid || left.expires.Time.Equal(right.expires.Time)
+}
+
 func lockProxyProbeIdentity(ctx context.Context, client *dbent.Client, proxyID int64) (proxyProbeIdentity, error) {
 	rows, err := client.QueryContext(ctx, `
-		SELECT protocol, host, port, COALESCE(username, ''), COALESCE(password, ''), status
+		SELECT protocol, host, port, COALESCE(username, ''), COALESCE(password, ''), status, expires_at
 		FROM proxies
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -215,10 +235,35 @@ func lockProxyProbeIdentity(ctx context.Context, client *dbent.Client, proxyID i
 		return proxyProbeIdentity{}, service.ErrProxyNotFound
 	}
 	var identity proxyProbeIdentity
-	if err := rows.Scan(&identity.protocol, &identity.host, &identity.port, &identity.username, &identity.password, &identity.status); err != nil {
+	if err := rows.Scan(&identity.protocol, &identity.host, &identity.port, &identity.username, &identity.password, &identity.status, &identity.expires); err != nil {
 		return proxyProbeIdentity{}, err
 	}
 	return identity, rows.Err()
+}
+
+func accountIDsReferencingProxyPool(ctx context.Context, exec sqlExecutor, proxyID int64) ([]int64, error) {
+	rows, err := exec.QueryContext(ctx, `
+		SELECT id
+		FROM accounts
+		WHERE deleted_at IS NULL
+			AND COALESCE(extra -> 'proxy_pool_ids', '[]'::jsonb) @> jsonb_build_array($1::bigint)
+	`, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	accountIDs := make([]int64, 0)
+	for rows.Next() {
+		var accountID int64
+		if err := rows.Scan(&accountID); err != nil {
+			return nil, err
+		}
+		accountIDs = append(accountIDs, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return accountIDs, nil
 }
 
 func invalidateProxyProbeSnapshots(ctx context.Context, exec sqlExecutor, proxyID int64) ([]int64, error) {
@@ -472,7 +517,12 @@ func (r *proxyRepository) ExistsByHostPortAuth(ctx context.Context, host string,
 // CountAccountsByProxyID returns the number of accounts using a specific proxy
 func (r *proxyRepository) CountAccountsByProxyID(ctx context.Context, proxyID int64) (int64, error) {
 	var count int64
-	if err := scanSingleRow(ctx, r.sql, "SELECT COUNT(*) FROM accounts WHERE proxy_id = $1 AND deleted_at IS NULL", []any{proxyID}, &count); err != nil {
+	if err := scanSingleRow(ctx, r.sql, `
+		SELECT COUNT(*)
+		FROM accounts
+		WHERE deleted_at IS NULL
+			AND (proxy_id = $1 OR COALESCE(extra -> 'proxy_pool_ids', '[]'::jsonb) @> jsonb_build_array($1))
+	`, []any{proxyID}, &count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -482,7 +532,8 @@ func (r *proxyRepository) ListAccountSummariesByProxyID(ctx context.Context, pro
 	rows, err := r.sql.QueryContext(ctx, `
 		SELECT id, name, platform, type, notes
 		FROM accounts
-		WHERE proxy_id = $1 AND deleted_at IS NULL
+		WHERE deleted_at IS NULL
+			AND (proxy_id = $1 OR COALESCE(extra -> 'proxy_pool_ids', '[]'::jsonb) @> jsonb_build_array($1))
 		ORDER BY id DESC
 	`, proxyID)
 	if err != nil {
@@ -522,7 +573,24 @@ func (r *proxyRepository) ListAccountSummariesByProxyID(ctx context.Context, pro
 
 // GetAccountCountsForProxies returns a map of proxy ID to account count for all proxies
 func (r *proxyRepository) GetAccountCountsForProxies(ctx context.Context) (counts map[int64]int64, err error) {
-	rows, err := r.sql.QueryContext(ctx, "SELECT proxy_id, COUNT(*) AS count FROM accounts WHERE proxy_id IS NOT NULL AND deleted_at IS NULL GROUP BY proxy_id")
+	rows, err := r.sql.QueryContext(ctx, `
+		WITH proxy_refs AS (
+			SELECT id AS account_id, proxy_id
+			FROM accounts
+			WHERE proxy_id IS NOT NULL AND deleted_at IS NULL
+			UNION
+			SELECT a.id AS account_id, value::bigint AS proxy_id
+			FROM accounts a
+			CROSS JOIN LATERAL jsonb_array_elements_text(
+				CASE WHEN jsonb_typeof(a.extra -> 'proxy_pool_ids') = 'array'
+					THEN a.extra -> 'proxy_pool_ids' ELSE '[]'::jsonb END
+			) AS pool(value)
+			WHERE a.deleted_at IS NULL AND value ~ '^[1-9][0-9]{0,17}$'
+		)
+		SELECT proxy_id, COUNT(DISTINCT account_id) AS count
+		FROM proxy_refs
+		GROUP BY proxy_id
+	`)
 	if err != nil {
 		return nil, err
 	}
@@ -733,6 +801,11 @@ func (r *proxyRepository) sweepOneExpiredProxyOnExec(ctx context.Context, exec s
 		if err != nil {
 			return nil, err
 		}
+		referencingAccountIDs, err := accountIDsReferencingProxyPool(ctx, exec, proxyID)
+		if err != nil {
+			return nil, err
+		}
+		accountIDs = append(accountIDs, referencingAccountIDs...)
 		if err := enqueueProxyProbeAccountChanges(ctx, exec, accountIDs); err != nil {
 			return nil, err
 		}
@@ -788,6 +861,11 @@ func (r *proxyRepository) sweepOneExpiredProxyOnExec(ctx context.Context, exec s
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	poolAccountIDs, err := accountIDsReferencingProxyPool(ctx, exec, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	accountIDs = append(accountIDs, poolAccountIDs...)
 	return accountIDs, nil
 }
 

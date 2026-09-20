@@ -328,17 +328,7 @@
           </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
-              <div v-if="row.proxy" class="flex items-center gap-2">
-                <span class="text-sm text-gray-700 dark:text-gray-300">{{ row.proxy.name }}</span>
-                <span v-if="row.proxy.country_code" class="text-xs text-gray-500 dark:text-gray-400">
-                  ({{ row.proxy.country_code }})
-                </span>
-              </div>
-              <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
-              <div v-if="row.proxy && row.proxy.expires_at" class="flex items-center gap-2 text-xs">
-                <span class="text-gray-600 dark:text-gray-300">{{ formatDateTime(row.proxy.expires_at) }}</span>
-                <span :class="proxyExpiryBadge(row.proxy)">{{ proxyExpiryText(row.proxy) }}</span>
-              </div>
+              <ProxyLanesCell :account="row" :proxies="proxies" />
               <div v-if="row.proxy_fallback_origin_id" class="flex items-center gap-1">
                 <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200" :title="t('admin.accounts.fallbackActiveTip', { origin: row.proxy_fallback_origin_name })">
                   {{ t('admin.accounts.fallbackActive') }}
@@ -458,7 +448,13 @@
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
-    <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
+    <ImportDataModal
+      :show="showImportData"
+      :proxies="proxies"
+      :groups="groups"
+      @close="showImportData = false"
+      @imported="handleDataImported"
+    />
     <BulkEditAccountModal
       :show="showBulkEdit"
       :account-ids="selIds"
@@ -519,6 +515,7 @@ import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
+import ProxyLanesCell from '@/components/account/ProxyLanesCell.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -527,7 +524,6 @@ import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfil
 import { fetchAllAccountIds } from '@/utils/accountSelection'
 import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
-import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
@@ -642,11 +638,13 @@ const accountToolsDropdownStyle = computed(() => ({
   width: `${accountToolsDropdownPosition.width}px`
 }))
 const hiddenColumns = reactive<Set<string>>(new Set())
-const DEFAULT_HIDDEN_COLUMNS = ['today_stats', 'proxy', 'notes', 'scheduler_score', 'rate_multiplier']
+const DEFAULT_HIDDEN_COLUMNS = ['today_stats', 'notes', 'scheduler_score', 'rate_multiplier']
 const HIDDEN_COLUMNS_KEY = 'account-hidden-columns'
 // One-time migration: hide scheduler score for existing admins too, because showing it opt-ins to heavy backend scoring.
 const HIDDEN_COLUMNS_VERSION_KEY = 'account-hidden-columns-version'
 const HIDDEN_COLUMNS_CURRENT_VERSION = 'scheduler-score-hidden-by-default'
+const PROXY_COLUMN_VISIBILITY_VERSION_KEY = 'account-proxy-lanes-column-version'
+const PROXY_COLUMN_VISIBILITY_CURRENT_VERSION = 'proxy-lanes-visible-v1'
 
 // Sorting settings
 const ACCOUNT_SORT_STORAGE_KEY = 'account-table-sort'
@@ -959,11 +957,17 @@ const loadSavedColumns = () => {
         localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
         localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
       }
+      if (localStorage.getItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY) !== PROXY_COLUMN_VISIBILITY_CURRENT_VERSION) {
+        hiddenColumns.delete('proxy')
+        localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
+        localStorage.setItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY, PROXY_COLUMN_VISIBILITY_CURRENT_VERSION)
+      }
     } else {
       DEFAULT_HIDDEN_COLUMNS.forEach(key => {
         hiddenColumns.add(key)
       })
       localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
+      localStorage.setItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY, PROXY_COLUMN_VISIBILITY_CURRENT_VERSION)
     }
   } catch (e) {
     console.error('Failed to load saved columns:', e)
@@ -977,6 +981,7 @@ const saveColumnsToStorage = () => {
   try {
     localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
     localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
+    localStorage.setItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY, PROXY_COLUMN_VISIBILITY_CURRENT_VERSION)
   } catch (e) {
     console.error('Failed to save columns:', e)
   }
@@ -1287,6 +1292,34 @@ const refreshUpstreamBillingSortedList = async (force = false) => {
 
 useIntervalFn(() => { void refreshUpstreamBillingRates() }, 5 * 60_000, { immediate: false })
 
+const refreshProxyLaneRuntime = async () => {
+  if (loading.value || accounts.value.length === 0 || hiddenColumns.has('proxy')) return
+  if (typeof document !== 'undefined' && document.hidden) return
+  try {
+    const runtime = await adminAPI.accounts.getProxyLaneRuntime(accounts.value.map((account) => account.id))
+    let changed = false
+    const next = accounts.value.map((account) => {
+      const item = runtime[String(account.id)]
+      if (!item) return account
+      if (
+        account.effective_concurrency === item.effective_concurrency &&
+        JSON.stringify(account.proxy_lanes || []) === JSON.stringify(item.lanes || [])
+      ) return account
+      changed = true
+      return {
+        ...account,
+        effective_concurrency: item.effective_concurrency,
+        proxy_lanes: item.lanes
+      }
+    })
+    if (changed) accounts.value = next
+  } catch (error) {
+    console.error('Failed to refresh proxy lane runtime:', error)
+  }
+}
+
+useIntervalFn(() => { void refreshProxyLaneRuntime() }, 3000, { immediate: false })
+
 const debouncedReload = () => {
   clearSelection()
   syncAccountListDerivedParams()
@@ -1386,6 +1419,8 @@ const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
   return (
     current.updated_at !== next.updated_at ||
     current.current_concurrency !== next.current_concurrency ||
+    current.effective_concurrency !== next.effective_concurrency ||
+    JSON.stringify(current.proxy_lanes || []) !== JSON.stringify(next.proxy_lanes || []) ||
     current.current_window_cost !== next.current_window_cost ||
     current.active_sessions !== next.active_sessions ||
     current.schedulable !== next.schedulable ||
@@ -2352,9 +2387,10 @@ const handleDuplicateAccount = async (a: Account) => {
 }
 const handleRefresh = async (a: Account) => {
   try {
-    const updated = await adminAPI.accounts.refreshCredentials(a.id)
-    patchAccountInList(updated)
+    const result = await adminAPI.accounts.refreshCredentials(a.id)
+    patchAccountInList(result.account)
     enterAutoRefreshSilentWindow()
+    if (result.warning) appStore.showWarning(result.message)
   } catch (error) {
     console.error('Failed to refresh credentials:', error)
   }
@@ -2488,13 +2524,6 @@ const isExpired = (value: number | null) => {
   if (!value) return false
   return value * 1000 <= Date.now()
 }
-// 所绑定代理的有效期(逻辑同 /admin/proxies,见 utils/proxyExpiry)
-const proxyExpiryBadge = (p: AccountProxy): string => proxyExpiryBadgeClass(p.expires_at, p.status)
-const proxyExpiryText = (p: AccountProxy): string => {
-  const { key, params } = proxyExpiryLabelKey(p.expires_at, p.status)
-  return params ? t(key, params) : t(key)
-}
-
 // 表格滚动时关闭行操作菜单，并让顶部工具菜单继续贴紧触发按钮。
 const handleScroll = (event: Event) => {
   if (event.target instanceof Element && event.target.closest('.action-menu-content')) return

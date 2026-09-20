@@ -686,7 +686,7 @@ func (s *stubAdminService) TestProxy(ctx context.Context, id int64) (*service.Pr
 	s.mu.Lock()
 	s.testedProxyIDs = append(s.testedProxyIDs, id)
 	s.mu.Unlock()
-	return &service.ProxyTestResult{Success: true, Message: "ok"}, nil
+	return &service.ProxyTestResult{Success: true, Message: "ok", LatencyMs: id * 10}, nil
 }
 
 func (s *stubAdminService) CheckProxyQuality(ctx context.Context, id int64) (*service.ProxyQualityCheckResult, error) {

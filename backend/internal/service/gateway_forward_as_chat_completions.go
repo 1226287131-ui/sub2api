@@ -112,10 +112,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	}
 
 	// 9. Get proxy URL
-	proxyURL := ""
-	if account.ProxyID != nil && account.Proxy != nil {
-		proxyURL = account.Proxy.URL()
-	}
+	proxyURL := account.NextProxyLaneURL()
 
 	// 10. Build upstream request
 	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)

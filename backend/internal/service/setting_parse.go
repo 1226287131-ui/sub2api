@@ -202,6 +202,9 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		// Available channels feature (default disabled; opt-in)
 		SettingKeyAvailableChannelsEnabled: "false",
 
+		// Subscription feature (default enabled; opt-out)
+		SettingKeySubscriptionEnabled: "true",
+
 		// Model plaza feature (default disabled; opt-in, public unless require_auth)
 		SettingKeyModelPlazaEnabled:       "false",
 		SettingKeyModelPlazaRequireAuth:   "false",
@@ -243,6 +246,10 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpenAICodexClientVersion:                           "",
 		SettingKeyOpenAICodexClientVersionSynced:                     "",
 		SettingKeyOpenAICodexVersionAutoSyncEnabled:                  "true",
+		SettingKeyOpenAICodexTicketHarvestProxyURL:                   "",
+		SettingKeyOpenAICodexTicketMissRetrySeconds:                  strconv.Itoa(openAICodexTicketDefaultMissRetrySeconds),
+		SettingKeyOpenAICodexTicketRateLimitRetrySeconds:             strconv.Itoa(openAICodexTicketDefaultRateLimitRetrySeconds),
+		SettingKeyOpenAICodexTicketModelPolicies:                     DefaultOpenAICodexTicketModelPoliciesJSON(),
 		SettingPaymentVisibleMethodAlipaySource:                      "",
 		SettingPaymentVisibleMethodWxpaySource:                       "",
 		SettingPaymentVisibleMethodAlipayEnabled:                     "false",
@@ -820,6 +827,9 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	// Available channels feature (default: disabled; strict true)
 	result.AvailableChannelsEnabled = settings[SettingKeyAvailableChannelsEnabled] == "true"
 
+	// Subscription feature (default: enabled; only an explicit false disables)
+	result.SubscriptionEnabled = !isFalseSettingValue(settings[SettingKeySubscriptionEnabled])
+
 	// Model plaza feature (default: disabled; strict true)
 	result.ModelPlazaEnabled = settings[SettingKeyModelPlazaEnabled] == "true"
 	result.ModelPlazaRequireAuth = settings[SettingKeyModelPlazaRequireAuth] == "true"
@@ -884,6 +894,33 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		result.OpenAICodexVersionAutoSyncEnabled = v == "true"
 	} else {
 		result.OpenAICodexVersionAutoSyncEnabled = true
+	}
+	if v, ok := settings[SettingKeyOpenAICodexTicketEnabled]; ok && v != "" {
+		result.OpenAICodexTicketEnabled = v == "true"
+	} else if s != nil && s.cfg != nil {
+		result.OpenAICodexTicketEnabled = s.cfg.Gateway.OpenAICodexTicket.Enabled
+	}
+	result.OpenAICodexTicketHarvestProxyURL = strings.TrimSpace(settings[SettingKeyOpenAICodexTicketHarvestProxyURL])
+	result.OpenAICodexTicketMissRetrySeconds = parseOpenAICodexTicketRetrySeconds(
+		settings[SettingKeyOpenAICodexTicketMissRetrySeconds],
+		openAICodexTicketDefaultMissRetrySeconds,
+		openAICodexTicketMinMissRetrySeconds,
+		openAICodexTicketMaxMissRetrySeconds,
+	)
+	result.OpenAICodexTicketRateLimitRetrySeconds = parseOpenAICodexTicketRetrySeconds(
+		settings[SettingKeyOpenAICodexTicketRateLimitRetrySeconds],
+		openAICodexTicketDefaultRateLimitRetrySeconds,
+		openAICodexTicketMinRateLimitRetrySeconds,
+		openAICodexTicketMaxRateLimitRetrySeconds,
+	)
+	var modelPolicies map[string]config.OpenAICodexTicketModelPolicy
+	if raw := strings.TrimSpace(settings[SettingKeyOpenAICodexTicketModelPolicies]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &modelPolicies)
+	}
+	if normalized, err := NormalizeOpenAICodexTicketModelPolicies(modelPolicies); err == nil {
+		result.OpenAICodexTicketModelPolicies = normalized
+	} else {
+		result.OpenAICodexTicketModelPolicies = DefaultOpenAICodexTicketModelPolicies()
 	}
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]

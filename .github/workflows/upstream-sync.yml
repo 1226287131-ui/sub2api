@@ -1,0 +1,248 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    # Check after the usual upstream release window, once per day.
+    - cron: '37 5 * * *'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Official source to follow
+        required: true
+        type: choice
+        default: latest-release
+        options:
+          - latest-release
+          - main
+      target_ref:
+        description: Optional explicit upstream ref/tag (for example v0.2.8)
+        required: false
+        type: string
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    if: github.repository == 'Tuava/sub2api-codex-ticket'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_REPOSITORY: Wei-Shaw/sub2api
+      UPSTREAM_URL: https://github.com/Wei-Shaw/sub2api.git
+
+    steps:
+      - name: Checkout Tuava main
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Fetch official repository and select target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch upstream --tags --prune
+
+          requested='${{ inputs.target_ref || '' }}'
+          channel='${{ inputs.channel || 'latest-release' }}'
+          if [[ -n "$requested" ]]; then
+            target_ref="$requested"
+            label="${requested//\//-}"
+          elif [[ "$channel" == "main" ]]; then
+            target_ref="upstream/main"
+            label="main"
+          else
+            target_ref="$(
+              git tag --merged upstream/main --sort=-version:refname \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | head -n 1
+            )"
+            if [[ -z "$target_ref" ]]; then
+              echo "No official release tag found" >&2
+              exit 1
+            fi
+            label="$target_ref"
+          fi
+
+          target_sha="$(git rev-parse "${target_ref}^{commit}")"
+          safe_label="$(printf '%s' "$label" | tr -cs 'A-Za-z0-9._-' '-')"
+          short_sha="${target_sha:0:12}"
+          branch="sync/upstream-${safe_label}-${short_sha}"
+
+          echo "ref=$target_ref" >> "$GITHUB_OUTPUT"
+          echo "sha=$target_sha" >> "$GITHUB_OUTPUT"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "$target_sha" HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Tuava main already contains $target_ref ($target_sha)"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Official update found: $target_ref ($target_sha)"
+          fi
+
+      - name: Merge official target into a sync branch
+        id: merge
+        if: steps.target.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Tuava Upstream Bot'
+          git config user.email '2679373771+tuava-upstream-bot@users.noreply.github.com'
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+          git checkout -b '${{ steps.target.outputs.branch }}'
+
+          set +e
+          git merge --no-ff --no-commit '${{ steps.target.outputs.sha }}'
+          merge_status=$?
+          set -e
+          if [[ $merge_status -ne 0 ]]; then
+            conflict_file="$RUNNER_TEMP/upstream-conflicts.txt"
+            git diff --name-only --diff-filter=U | sort > "$conflict_file"
+            {
+              echo 'conflicted=true'
+              echo 'files<<EOF'
+              cat "$conflict_file"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            git merge --abort
+            exit 0
+          fi
+
+          git commit -m 'chore: sync upstream ${{ steps.target.outputs.label }}'
+          echo 'conflicted=false' >> "$GITHUB_OUTPUT"
+
+      - name: Open or update conflict issue
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Upstream sync conflict: ${{ steps.target.outputs.label }}"
+          body_file="$RUNNER_TEMP/upstream-conflict-issue.md"
+          cat > "$body_file" <<'EOF'
+          ## Official update needs manual conflict resolution
+
+          The automated three-way merge could not safely combine the official update with the Tuava customization stack.
+
+          **Official target:** `${{ steps.target.outputs.ref }}`
+
+          **Official SHA:** `${{ steps.target.outputs.sha }}`
+
+          ### Conflicted files
+
+          ```text
+          ${{ steps.merge.outputs.files }}
+          ```
+
+          Run locally:
+
+          ```bash
+          git fetch upstream --tags --prune
+          git checkout main
+          git branch archive/main-before-manual-upstream-sync
+          git merge --no-ff ${{ steps.target.outputs.sha }}
+          # Resolve conflicts, run tests, then commit and push.
+          ```
+
+          The current `main` branch remains unchanged and deployable.
+          EOF
+
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --body-file "$body_file"
+            gh issue comment "$existing" --body "Conflict reproduced by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          else
+            gh issue create --title "$title" --body-file "$body_file"
+          fi
+
+      - name: Stop after reporting conflicts
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'true'
+        run: |
+          echo 'Conflict issue created; main was not modified.'
+          exit 1
+
+      - name: Set up Go
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'false'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Test backend
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'false'
+        working-directory: backend
+        run: go test ./...
+
+      - name: Set up pnpm
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'false'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'false'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'false'
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Check patch formatting
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'false'
+        run: git diff --check main...HEAD
+
+      - name: Push sync branch and create pull request
+        if: steps.target.outputs.changed == 'true' && steps.merge.outputs.conflicted == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='${{ steps.target.outputs.branch }}'
+          git fetch origin "$branch:refs/remotes/origin/$branch" 2>/dev/null || true
+          git push --force-with-lease origin "HEAD:refs/heads/$branch"
+
+          body_file="$RUNNER_TEMP/upstream-sync-pr.md"
+          cat > "$body_file" <<'EOF'
+          ## Automated official Sub2API update
+
+          - Official target: `${{ steps.target.outputs.ref }}`
+          - Official SHA: `${{ steps.target.outputs.sha }}`
+          - Tuava customization stack preserved by a three-way merge
+          - Backend `go test ./...`: passed
+          - Frontend production build: passed
+
+          ### Merge policy
+
+          Merge this PR with a **merge commit**. Do not squash or rebase it; retaining official ancestry makes the next upstream update substantially safer.
+          EOF
+
+          existing="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh pr edit "$existing" --title "chore: sync upstream ${{ steps.target.outputs.label }}" --body-file "$body_file"
+          else
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "chore: sync upstream ${{ steps.target.outputs.label }}" \
+              --body-file "$body_file"
+          fi

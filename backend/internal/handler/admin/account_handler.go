@@ -65,7 +65,13 @@ type AccountHandler struct {
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
+	codexTicketSettings     *service.SettingService
 	cfg                     *config.Config
+	codexTicketProber       CodexTicketProber
+}
+
+type CodexTicketProber interface {
+	ProbeOpenAICodexTicket(ctx context.Context, accountID int64, model string) ([]service.OpenAICodexTicketStatus, error)
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -75,6 +81,15 @@ func (h *AccountHandler) SetUpstreamBillingProbeService(probe *service.UpstreamB
 
 func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUsageService) {
 	h.ollamaCloudUsage = usage
+}
+
+// SetCodexTicketSettings supplies the live policy without mutating shared config.
+func (h *AccountHandler) SetCodexTicketSettings(settings *service.SettingService) {
+	h.codexTicketSettings = settings
+}
+
+func (h *AccountHandler) SetCodexTicketProber(prober CodexTicketProber) {
+	h.codexTicketProber = prober
 }
 
 // NewAccountHandler creates a new admin account handler
@@ -114,44 +129,50 @@ func NewAccountHandler(
 
 // CreateAccountRequest represents create account request
 type CreateAccountRequest struct {
-	Name                    string         `json:"name" binding:"required"`
-	Notes                   *string        `json:"notes"`
-	Platform                string         `json:"platform" binding:"required"`
-	Type                    string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
-	Credentials             map[string]any `json:"credentials" binding:"required"`
-	Extra                   map[string]any `json:"extra"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	Concurrency             int            `json:"concurrency"`
-	Priority                int            `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	GroupIDs                []int64        `json:"group_ids"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	Name                    string                    `json:"name" binding:"required"`
+	Notes                   *string                   `json:"notes"`
+	Platform                string                    `json:"platform" binding:"required"`
+	Type                    string                    `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Credentials             map[string]any            `json:"credentials" binding:"required"`
+	Extra                   map[string]any            `json:"extra"`
+	ProxyID                 *int64                    `json:"proxy_id"`
+	ProxyPoolIDs            []int64                   `json:"proxy_pool_ids"`
+	ProxyLaneConfigs        []service.ProxyLaneConfig `json:"proxy_lane_configs"`
+	ProxyLaneStrategy       string                    `json:"proxy_lane_strategy"`
+	Concurrency             int                       `json:"concurrency"`
+	Priority                int                       `json:"priority"`
+	RateMultiplier          *float64                  `json:"rate_multiplier"`
+	LoadFactor              *int                      `json:"load_factor"`
+	GroupIDs                []int64                   `json:"group_ids"`
+	ExpiresAt               *int64                    `json:"expires_at"`
+	AutoPauseOnExpired      *bool                     `json:"auto_pause_on_expired"`
+	ProbeEnabled            *bool                     `json:"upstream_billing_probe_enabled"`
+	ConfirmMixedChannelRisk *bool                     `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 // UpdateAccountRequest represents update account request
 // 使用指针类型来区分"未提供"和"设置为0"
 type UpdateAccountRequest struct {
-	Name                    string         `json:"name"`
-	Notes                   *string        `json:"notes"`
-	Type                    string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
-	Credentials             map[string]any `json:"credentials"`
-	Extra                   map[string]any `json:"extra"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	Concurrency             *int           `json:"concurrency"`
-	Priority                *int           `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	Status                  string         `json:"status" binding:"omitempty,oneof=active inactive error"`
-	GroupIDs                *[]int64       `json:"group_ids"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
-	RateSyncEnabled         *bool          `json:"upstream_billing_rate_sync_enabled"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	Name                    string                     `json:"name"`
+	Notes                   *string                    `json:"notes"`
+	Type                    string                     `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Credentials             map[string]any             `json:"credentials"`
+	Extra                   map[string]any             `json:"extra"`
+	ProxyID                 *int64                     `json:"proxy_id"`
+	ProxyPoolIDs            *[]int64                   `json:"proxy_pool_ids"`
+	ProxyLaneConfigs        *[]service.ProxyLaneConfig `json:"proxy_lane_configs"`
+	ProxyLaneStrategy       *string                    `json:"proxy_lane_strategy"`
+	Concurrency             *int                       `json:"concurrency"`
+	Priority                *int                       `json:"priority"`
+	RateMultiplier          *float64                   `json:"rate_multiplier"`
+	LoadFactor              *int                       `json:"load_factor"`
+	Status                  string                     `json:"status" binding:"omitempty,oneof=active inactive error"`
+	GroupIDs                *[]int64                   `json:"group_ids"`
+	ExpiresAt               *int64                     `json:"expires_at"`
+	AutoPauseOnExpired      *bool                      `json:"auto_pause_on_expired"`
+	ProbeEnabled            *bool                      `json:"upstream_billing_probe_enabled"`
+	RateSyncEnabled         *bool                      `json:"upstream_billing_rate_sync_enabled"`
+	ConfirmMixedChannelRisk *bool                      `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 // BulkUpdateAccountsRequest represents the payload for bulk editing accounts
@@ -182,6 +203,47 @@ type BulkUpdateAccountFilters struct {
 	PrivacyMode string `json:"privacy_mode"`
 }
 
+func hasBulkUpdateAccountFields(req *BulkUpdateAccountsRequest) bool {
+	if req == nil {
+		return false
+	}
+	return req.Name != "" ||
+		req.ProxyID != nil ||
+		req.Concurrency != nil ||
+		req.Priority != nil ||
+		req.RateMultiplier != nil ||
+		req.LoadFactor != nil ||
+		req.Status != "" ||
+		req.Schedulable != nil ||
+		req.GroupIDs != nil ||
+		len(req.Credentials) > 0 ||
+		len(req.Extra) > 0 ||
+		req.ProbeEnabled != nil
+}
+
+func toServiceBulkUpdateAccountsInput(req *BulkUpdateAccountsRequest) *service.BulkUpdateAccountsInput {
+	if req == nil {
+		return nil
+	}
+	return &service.BulkUpdateAccountsInput{
+		AccountIDs:            req.AccountIDs,
+		Filters:               toServiceBulkUpdateAccountFilters(req.Filters),
+		Name:                  req.Name,
+		ProxyID:               req.ProxyID,
+		Concurrency:           req.Concurrency,
+		Priority:              req.Priority,
+		RateMultiplier:        req.RateMultiplier,
+		LoadFactor:            req.LoadFactor,
+		Status:                req.Status,
+		Schedulable:           req.Schedulable,
+		GroupIDs:              req.GroupIDs,
+		Credentials:           req.Credentials,
+		Extra:                 req.Extra,
+		ProbeEnabled:          req.ProbeEnabled,
+		SkipMixedChannelCheck: req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk,
+	}
+}
+
 // CheckMixedChannelRequest represents check mixed channel risk request
 type CheckMixedChannelRequest struct {
 	Platform  string  `json:"platform" binding:"required"`
@@ -192,10 +254,12 @@ type CheckMixedChannelRequest struct {
 // AccountWithConcurrency extends Account with real-time concurrency info
 type AccountWithConcurrency struct {
 	*dto.Account
-	simpleMode         bool                         `json:"-"`
-	CurrentConcurrency int                          `json:"current_concurrency"`
-	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
-	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
+	simpleMode           bool                         `json:"-"`
+	CurrentConcurrency   int                          `json:"current_concurrency"`
+	EffectiveConcurrency int                          `json:"effective_concurrency"`
+	ProxyLanes           []service.ProxyLaneStatus    `json:"proxy_lanes,omitempty"`
+	SchedulerScore       *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
+	SchedulerScores      []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
 	// 以下字段仅对 Anthropic OAuth/SetupToken 账号有效，且仅在启用相应功能时返回
 	CurrentWindowCost *float64 `json:"current_window_cost,omitempty"` // 当前窗口费用
 	ActiveSessions    *int     `json:"active_sessions,omitempty"`     // 当前活跃会话数
@@ -207,12 +271,54 @@ type AccountWithConcurrency struct {
 // so groups/account_groups never appear in the list payload.
 type AccountListItemWithConcurrency struct {
 	*dto.AccountListItem
-	CurrentConcurrency int                          `json:"current_concurrency"`
-	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
-	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
-	CurrentWindowCost  *float64                     `json:"current_window_cost,omitempty"`
-	ActiveSessions     *int                         `json:"active_sessions,omitempty"`
-	CurrentRPM         *int                         `json:"current_rpm,omitempty"`
+	CurrentConcurrency   int                          `json:"current_concurrency"`
+	EffectiveConcurrency int                          `json:"effective_concurrency"`
+	ProxyLanes           []service.ProxyLaneStatus    `json:"proxy_lanes,omitempty"`
+	SchedulerScore       *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
+	SchedulerScores      []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
+	CurrentWindowCost    *float64                     `json:"current_window_cost,omitempty"`
+	ActiveSessions       *int                         `json:"active_sessions,omitempty"`
+	CurrentRPM           *int                         `json:"current_rpm,omitempty"`
+}
+
+type ProxyLaneRuntimeRequest struct {
+	AccountIDs []int64 `json:"account_ids" binding:"required"`
+}
+
+type ProxyLaneRuntimeItem struct {
+	EffectiveConcurrency int                       `json:"effective_concurrency"`
+	Lanes                []service.ProxyLaneStatus `json:"lanes"`
+}
+
+// GetProxyLaneRuntime returns a lightweight live snapshot for the visible
+// account rows. It avoids re-running the full account-list query every three
+// seconds while preserving exact in-process request lifecycle counters.
+func (h *AccountHandler) GetProxyLaneRuntime(c *gin.Context) {
+	var req ProxyLaneRuntimeRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.AccountIDs) == 0 {
+		response.BadRequest(c, "account_ids is required")
+		return
+	}
+	if len(req.AccountIDs) > 200 {
+		response.BadRequest(c, "account_ids exceeds 200")
+		return
+	}
+	accounts, err := h.adminService.GetAccountsByIDs(c.Request.Context(), req.AccountIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	items := make(map[string]ProxyLaneRuntimeItem, len(accounts))
+	for _, account := range accounts {
+		if account == nil {
+			continue
+		}
+		items[strconv.FormatInt(account.ID, 10)] = ProxyLaneRuntimeItem{
+			EffectiveConcurrency: account.EffectiveConcurrency(),
+			Lanes:                service.AccountProxyLaneStatuses(account),
+		}
+	}
+	response.Success(c, gin.H{"items": items})
 }
 
 type simpleModeGroupReference struct {
@@ -337,6 +443,7 @@ const accountListGroupUngroupedQueryValue = "ungrouped"
 
 func (h *AccountHandler) accountResponseFromService(account *service.Account) *dto.Account {
 	out := dto.AccountFromService(account)
+	h.enrichCodexTicketStatus(account, out)
 	if h != nil && h.ollamaCloudUsage != nil && out != nil {
 		h.ollamaCloudUsage.EnrichState(out.OllamaCloudUsage)
 	}
@@ -345,6 +452,7 @@ func (h *AccountHandler) accountResponseFromService(account *service.Account) *d
 
 func (h *AccountHandler) accountListResponseFromService(account *service.Account) *dto.Account {
 	out := dto.AccountFromServiceShallow(account)
+	h.enrichCodexTicketStatus(account, out)
 	if out != nil && account != nil {
 		out.Proxy = dto.ProxyFromService(account.Proxy)
 	}
@@ -352,6 +460,17 @@ func (h *AccountHandler) accountListResponseFromService(account *service.Account
 		h.ollamaCloudUsage.EnrichState(out.OllamaCloudUsage)
 	}
 	return out
+}
+
+func (h *AccountHandler) enrichCodexTicketStatus(account *service.Account, out *dto.Account) {
+	if h != nil && h.cfg != nil && out != nil {
+		cfg := h.cfg.Gateway.OpenAICodexTicket
+		if h.codexTicketSettings != nil {
+			cfg.Enabled = h.codexTicketSettings.GetOpenAICodexTicketEnabled(context.Background(), cfg.Enabled)
+			cfg.ModelPolicies = h.codexTicketSettings.GetOpenAICodexTicketModelPolicies(context.Background(), cfg.ModelPolicies)
+		}
+		out.CodexTurnTickets = service.OpenAICodexTicketStatuses(account, cfg, time.Now())
+	}
 }
 
 func (h *AccountHandler) isSimpleMode() bool {
@@ -367,6 +486,8 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 	if account == nil {
 		return item
 	}
+	item.EffectiveConcurrency = account.EffectiveConcurrency()
+	item.ProxyLanes = service.AccountProxyLaneStatuses(account)
 
 	if h.concurrencyService != nil {
 		if counts, err := h.concurrencyService.GetAccountConcurrencyBatch(ctx, []int64{account.ID}); err == nil {
@@ -794,11 +915,13 @@ func (h *AccountHandler) List(c *gin.Context) {
 			}
 		}
 		item := AccountWithConcurrency{
-			Account:            accountResponse,
-			simpleMode:         h.isSimpleMode(),
-			CurrentConcurrency: concurrencyCounts[acc.ID],
-			SchedulerScore:     schedulerScores[acc.ID],
-			SchedulerScores:    schedulerGroupScores[acc.ID],
+			Account:              accountResponse,
+			simpleMode:           h.isSimpleMode(),
+			CurrentConcurrency:   concurrencyCounts[acc.ID],
+			EffectiveConcurrency: acc.EffectiveConcurrency(),
+			ProxyLanes:           service.AccountProxyLaneStatuses(acc),
+			SchedulerScore:       schedulerScores[acc.ID],
+			SchedulerScores:      schedulerGroupScores[acc.ID],
 		}
 
 		// 添加窗口费用（仅当启用时）
@@ -832,13 +955,15 @@ func (h *AccountHandler) List(c *gin.Context) {
 		for i := range result {
 			item := result[i]
 			compact[i] = AccountListItemWithConcurrency{
-				AccountListItem:    dto.AccountListItemFromAccount(item.Account),
-				CurrentConcurrency: item.CurrentConcurrency,
-				SchedulerScore:     item.SchedulerScore,
-				SchedulerScores:    item.SchedulerScores,
-				CurrentWindowCost:  item.CurrentWindowCost,
-				ActiveSessions:     item.ActiveSessions,
-				CurrentRPM:         item.CurrentRPM,
+				AccountListItem:      dto.AccountListItemFromAccount(item.Account),
+				CurrentConcurrency:   item.CurrentConcurrency,
+				EffectiveConcurrency: item.EffectiveConcurrency,
+				ProxyLanes:           item.ProxyLanes,
+				SchedulerScore:       item.SchedulerScore,
+				SchedulerScores:      item.SchedulerScores,
+				CurrentWindowCost:    item.CurrentWindowCost,
+				ActiveSessions:       item.ActiveSessions,
+				CurrentRPM:           item.CurrentRPM,
 			}
 		}
 		etag := buildAccountsListETag(compact, total, page, pageSize, platform, accountType, status, search, true)
@@ -946,6 +1071,35 @@ func (h *AccountHandler) GetByID(c *gin.Context) {
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
 
+type ProbeCodexTicketRequest struct {
+	Model string `json:"model" binding:"required"`
+}
+
+// ProbeCodexTicket performs one immediate, model-specific ticket harvest.
+// POST /api/v1/admin/accounts/:id/codex-ticket/probe
+func (h *AccountHandler) ProbeCodexTicket(c *gin.Context) {
+	if h == nil || h.codexTicketProber == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Codex ticket prober unavailable")
+		return
+	}
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	var req ProbeCodexTicketRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	statuses, err := h.codexTicketProber.ProbeOpenAICodexTicket(c.Request.Context(), accountID, req.Model)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"model": req.Model, "tickets": statuses})
+}
+
 // CheckMixedChannel handles checking mixed channel risk for account-group binding.
 // POST /api/v1/admin/accounts/check-mixed-channel
 func (h *AccountHandler) CheckMixedChannel(c *gin.Context) {
@@ -1029,6 +1183,9 @@ func (h *AccountHandler) Create(c *gin.Context) {
 			Credentials:           req.Credentials,
 			Extra:                 req.Extra,
 			ProxyID:               req.ProxyID,
+			ProxyPoolIDs:          req.ProxyPoolIDs,
+			ProxyLaneConfigs:      req.ProxyLaneConfigs,
+			ProxyLaneStrategy:     req.ProxyLaneStrategy,
 			Concurrency:           req.Concurrency,
 			Priority:              req.Priority,
 			RateMultiplier:        req.RateMultiplier,
@@ -1160,6 +1317,9 @@ func (h *AccountHandler) Update(c *gin.Context) {
 		Credentials:           req.Credentials,
 		Extra:                 req.Extra,
 		ProxyID:               req.ProxyID,
+		ProxyPoolIDs:          req.ProxyPoolIDs,
+		ProxyLaneConfigs:      req.ProxyLaneConfigs,
+		ProxyLaneStrategy:     req.ProxyLaneStrategy,
 		Concurrency:           req.Concurrency, // 指针类型，nil 表示未提供
 		Priority:              req.Priority,    // 指针类型，nil 表示未提供
 		RateMultiplier:        req.RateMultiplier,
@@ -1545,6 +1705,7 @@ func (h *AccountHandler) Refresh(c *gin.Context) {
 
 	if warning == "missing_project_id_temporary" {
 		response.Success(c, gin.H{
+			"account": h.buildAccountResponseWithRuntime(c.Request.Context(), updatedAccount),
 			"message": "Token refreshed successfully, but project_id could not be retrieved (will retry automatically)",
 			"warning": "missing_project_id_temporary",
 		})
@@ -2108,6 +2269,9 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 				Credentials:           item.Credentials,
 				Extra:                 item.Extra,
 				ProxyID:               item.ProxyID,
+				ProxyPoolIDs:          item.ProxyPoolIDs,
+				ProxyLaneConfigs:      item.ProxyLaneConfigs,
+				ProxyLaneStrategy:     item.ProxyLaneStrategy,
 				Concurrency:           item.Concurrency,
 				Priority:              item.Priority,
 				RateMultiplier:        item.RateMultiplier,
@@ -2299,41 +2463,14 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	// 确定是否跳过混合渠道检查
 	skipCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
 
-	hasUpdates := req.Name != "" ||
-		req.ProxyID != nil ||
-		req.Concurrency != nil ||
-		req.Priority != nil ||
-		req.RateMultiplier != nil ||
-		req.LoadFactor != nil ||
-		req.Status != "" ||
-		req.Schedulable != nil ||
-		req.GroupIDs != nil ||
-		len(req.Credentials) > 0 ||
-		len(req.Extra) > 0 ||
-		req.ProbeEnabled != nil
-
-	if !hasUpdates {
+	if !hasBulkUpdateAccountFields(&req) {
 		response.BadRequest(c, "No updates provided")
 		return
 	}
 
-	result, err := h.adminService.BulkUpdateAccounts(c.Request.Context(), &service.BulkUpdateAccountsInput{
-		AccountIDs:            req.AccountIDs,
-		Filters:               toServiceBulkUpdateAccountFilters(req.Filters),
-		Name:                  req.Name,
-		ProxyID:               req.ProxyID,
-		Concurrency:           req.Concurrency,
-		Priority:              req.Priority,
-		RateMultiplier:        req.RateMultiplier,
-		LoadFactor:            req.LoadFactor,
-		Status:                req.Status,
-		Schedulable:           req.Schedulable,
-		GroupIDs:              req.GroupIDs,
-		Credentials:           req.Credentials,
-		Extra:                 req.Extra,
-		ProbeEnabled:          req.ProbeEnabled,
-		SkipMixedChannelCheck: skipCheck,
-	})
+	bulkInput := toServiceBulkUpdateAccountsInput(&req)
+	bulkInput.SkipMixedChannelCheck = skipCheck
+	result, err := h.adminService.BulkUpdateAccounts(c.Request.Context(), bulkInput)
 	if err != nil {
 		var mixedErr *service.MixedChannelError
 		if errors.As(err, &mixedErr) {

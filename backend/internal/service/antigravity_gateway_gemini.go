@@ -86,7 +86,14 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		return nil, s.writeGoogleError(c, http.StatusNotFound, "Unsupported action: "+action)
 	}
 
-	mappedModel := s.getMappedModel(account, originalModel)
+	// 裸模型名（gemini-3.8-flash）+ thinkingConfig → 账号映射表里对应的 -low/-medium/-high 变体；
+	// 裸名有显式映射时保持原行为。
+	mappedModel, variantResolved := resolveGeminiThinkingVariant(account, originalModel, body)
+	if !variantResolved {
+		mappedModel = s.getMappedModel(account, originalModel)
+	} else {
+		logger.LegacyPrintf("service.antigravity_gateway", "%s resolved bare Gemini model %s to thinking variant %s", prefix, originalModel, mappedModel)
+	}
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		return nil, s.writeGoogleError(c, http.StatusForbidden, fmt.Sprintf("model %s not in whitelist", originalModel))
@@ -112,10 +119,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	}
 
 	// 代理 URL
-	proxyURL := ""
-	if account.ProxyID != nil && account.Proxy != nil {
-		proxyURL = account.Proxy.URL()
-	}
+	proxyURL := account.NextProxyLaneURL()
 
 	// Antigravity 上游要求必须包含身份提示词，注入到请求中
 	injectedBody, err := injectIdentityPatchToGeminiRequest(body)
@@ -129,6 +133,11 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Cleaned request schema in forwarded request for account %s", account.Name)
 	} else {
 		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Failed to clean schema: %v", err)
+	}
+
+	// Antigravity v1internal rejects built-in + functionDeclarations mixes (#6464).
+	if reconciled, err := enableMixedGeminiToolInvocations(injectedBody); err == nil {
+		injectedBody = reconciled
 	}
 
 	// 包装请求
