@@ -33,6 +33,25 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	body []byte,
 	parsed *ParsedRequest,
 ) (*ForwardResult, error) {
+	groupID := getOpenAIGroupIDFromContext(c)
+	if parsed != nil && parsed.GroupID != nil {
+		groupID = *parsed.GroupID
+	}
+	ctx, cacheCreationAsInput := withChannelCacheCreationPolicy(ctx, c, s.channelService, groupID, account)
+	result, err := s.forwardAsChatCompletionsWithCacheCreationPolicy(ctx, c, account, body, parsed)
+	if result != nil && result.CacheCreationAsInput == nil {
+		result.CacheCreationAsInput = &cacheCreationAsInput
+	}
+	return result, err
+}
+
+func (s *GatewayService) forwardAsChatCompletionsWithCacheCreationPolicy(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	parsed *ParsedRequest,
+) (*ForwardResult, error) {
 	startTime := time.Now()
 
 	// 1. Parse Chat Completions request
@@ -334,9 +353,10 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 	// (parity with Parrot non-stream flow that marshals → restore → emit).
 	if respBytes, err := json.Marshal(ccResp); err == nil {
 		respBytes = reverseToolNamesIfPresent(c, respBytes)
+		respBytes = sanitizeCacheCreationClientJSON(c, respBytes)
 		c.Data(http.StatusOK, "application/json; charset=utf-8", respBytes)
 	} else {
-		c.JSON(http.StatusOK, ccResp)
+		writeCacheCreationClientJSON(c, http.StatusOK, ccResp)
 	}
 
 	return &ForwardResult{
@@ -411,6 +431,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 		// Reverse tool name mapping: fake → real, per-chunk bytes.Replace.
 		// c 可能持有请求侧注入的 ToolNameRewrite；无则仅做静态前缀还原。
 		out := string(reverseToolNamesIfPresent(c, []byte(sse)))
+		out = sanitizeCacheCreationClientSSE(c, out)
 		if _, err := fmt.Fprint(c.Writer, out); err != nil {
 			return true // client disconnected
 		}

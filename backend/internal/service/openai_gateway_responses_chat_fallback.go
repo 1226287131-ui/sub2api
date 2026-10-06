@@ -167,7 +167,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	}
-	c.JSON(http.StatusOK, responsesResp)
+	writeCacheCreationClientJSON(c, http.StatusOK, responsesResp)
 
 	return &OpenAIForwardResult{
 		RequestID:                   requestID,
@@ -222,7 +222,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 				)
 				continue
 			}
-			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+			if _, err := fmt.Fprint(c.Writer, sanitizeCacheCreationClientSSE(c, sse)); err != nil {
 				clientDisconnected = true
 				logger.L().Debug("openai responses chat fallback: client disconnected, continuing to drain upstream for billing",
 					zap.Error(err),

@@ -667,6 +667,19 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				data = string(sanitizedData)
 				line = "data: " + data
 			}
+			// Keep an unmodified copy for billing usage parsing. Client response
+			// sanitization below must never erase cache creation accounting.
+			usageDataBytes := dataBytes
+			// Usage was already observed above for billing/logging. Strip cache
+			// creation fields only from this client-facing SSE event when the
+			// channel policy is enabled.
+			if hideCacheCreationEnabled(ctx) {
+				if sanitizedData := sanitizeCacheCreationJSON(dataBytes); !bytes.Equal(sanitizedData, dataBytes) {
+					dataBytes = sanitizedData
+					data = string(sanitizedData)
+					line = "data: " + data
+				}
+			}
 			// Replace model in response if needed.
 			if needModelReplace {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
@@ -720,7 +733,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				firstTokenMs = &ms
 				stopFirstOutputTimer()
 			}
-			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+			s.parseSSEUsageBytesWithType(usageDataBytes, eventType, usage)
 			return
 		}
 
@@ -1578,6 +1591,10 @@ func openAICacheCreationTokensFromUsage(value gjson.Result) int {
 		value.Get("prompt_tokens_details.cache_write_tokens"),
 		value.Get("input_tokens_details.cache_creation_tokens"),
 		value.Get("prompt_tokens_details.cache_creation_tokens"),
+		value.Get("input_tokens_details.cached_creation_tokens"),
+		value.Get("prompt_tokens_details.cached_creation_tokens"),
+		value.Get("input_tokens_details.cached_creation_input_tokens"),
+		value.Get("prompt_tokens_details.cached_creation_input_tokens"),
 	} {
 		if nested.Exists() {
 			return max(int(nested.Int()), 0)
@@ -1589,6 +1606,8 @@ func openAICacheCreationTokensFromUsage(value gjson.Result) int {
 		value.Get("cache_creation_input_tokens"),
 		value.Get("cache_write_input_tokens"),
 		value.Get("cache_creation_tokens"),
+		value.Get("cached_creation_tokens"),
+		value.Get("cached_creation_input_tokens"),
 	)
 }
 
@@ -1611,7 +1630,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	// Some OpenAI-compatible upstreams (including other sub2api instances)
 	// may return SSE even when stream=false was requested.
 	if isEventStreamResponse(resp.Header) {
-		return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+		return s.handleSSEToJSON(ctx, resp, c, account, body, originalModel, mappedModel)
 	}
 	// bodyLooksLikeSSE is a line-level heuristic: real SSE framing requires
 	// "data:"/"event:" field names at the very start of a physical line. A
@@ -1627,7 +1646,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	// positives on JSON responses that coincidentally contain "data:" or
 	// "event:" in their text content.
 	if account.Type == AccountTypeOAuth && bodyLooksLikeSSE {
-		return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+		return s.handleSSEToJSON(ctx, resp, c, account, body, originalModel, mappedModel)
 	}
 	if account != nil && account.IsGrok() && isOpenAIResponsesCompactPath(c) {
 		body, err = convertGrokResponseToOpenAICompact(body)
@@ -1639,7 +1658,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	usageValue, usageOK := extractOpenAIUsageFromJSONBytes(body)
 	if !usageOK {
 		if bodyLooksLikeSSE {
-			return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+			return s.handleSSEToJSON(ctx, resp, c, account, body, originalModel, mappedModel)
 		}
 		return nil, fmt.Errorf("parse response: invalid json response")
 	}
@@ -1649,6 +1668,9 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	// Replace model in response if needed
 	if originalModel != mappedModel {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+	}
+	if hideCacheCreationEnabled(ctx) {
+		body = sanitizeCacheCreationJSON(body)
 	}
 	body, err = restoreGrokResponsesClientToolPayload(c, body)
 	if err != nil {
@@ -1710,7 +1732,7 @@ func bodyHasSSEFraming(body []byte) bool {
 	return false
 }
 
-func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {
+func (s *OpenAIGatewayService) handleSSEToJSON(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {
 	bodyText := string(body)
 	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
 	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
@@ -1769,6 +1791,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 			bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
 		}
 		body = []byte(bodyText)
+	}
+	if hideCacheCreationEnabled(ctx) {
+		body = sanitizeCacheCreationJSON(body)
 	}
 
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)

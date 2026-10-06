@@ -17,8 +17,19 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Forward forwards request to OpenAI API
+// Forward forwards request to OpenAI API.
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	ctx, cacheCreationAsInput := withChannelCacheCreationPolicy(
+		ctx, c, s.channelService, getOpenAIGroupIDFromContext(c), account,
+	)
+	result, err := s.forwardWithCacheCreationPolicy(ctx, c, account, body)
+	if result != nil && result.CacheCreationAsInput == nil {
+		result.CacheCreationAsInput = &cacheCreationAsInput
+	}
+	return result, err
+}
+
+func (s *OpenAIGatewayService) forwardWithCacheCreationPolicy(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {

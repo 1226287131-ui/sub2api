@@ -2162,6 +2162,19 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				trimmedData = strings.TrimSpace(string(sanitizedData))
 				line = "data: " + string(sanitizedData)
 			}
+			// Preserve the complete upstream event for billing usage parsing; the
+			// client-facing copy may have cache creation fields removed below.
+			usageDataBytes := dataBytes
+			// Keep complete usage for billing/observation, but remove cache
+			// creation fields from the client-facing OpenAI SSE event when the
+			// channel policy is enabled.
+			if hideCacheCreationEnabled(ctx) {
+				if sanitizedData := sanitizeCacheCreationJSON(dataBytes); !bytes.Equal(sanitizedData, dataBytes) {
+					dataBytes = sanitizedData
+					trimmedData = strings.TrimSpace(string(sanitizedData))
+					line = "data: " + string(sanitizedData)
+				}
+			}
 			lineStartsClientOutput = forceFlushFailedEvent || openAIStreamDataStartsClientOutput(trimmedData, eventType)
 			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
 				semanticOutputSeen = true
@@ -2179,7 +2192,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 			}
-			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+			s.parseSSEUsageBytesWithType(usageDataBytes, eventType, usage)
 		}
 		if line == "" {
 			pendingSSEEventType = ""
@@ -2316,7 +2329,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	// stream=false was requested. Without this conversion the client would
 	// receive raw SSE text or a terminal event with empty output.
 	if isEventStreamResponse(resp.Header) {
-		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+		return s.handlePassthroughSSEToJSON(ctx, resp, c, account, body, originalModel, mappedModel)
 	}
 
 	usage := &OpenAIUsage{}
@@ -2341,6 +2354,9 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	}
 	if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+	}
+	if hideCacheCreationEnabled(ctx) {
+		body = sanitizeCacheCreationJSON(body)
 	}
 	body, err = restoreOpenAIResponsesNamespacePayload(c, body)
 	if err != nil {
@@ -2367,7 +2383,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 // response for the passthrough path. It mirrors handleSSEToJSON while
 // preserving passthrough payloads, except compact-only model remapping may
 // rewrite model fields back to the original requested model.
-func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
+func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
 	bodyText := string(body)
 	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
 	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
@@ -2418,9 +2434,12 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		}
 		body = []byte(bodyText)
 	}
+	if hideCacheCreationEnabled(ctx) {
+		body = sanitizeCacheCreationJSON(body)
+	}
 
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
-	logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, usage, terminalType, false)
+	logOpenAISuccessMissingUsage(ctx, c, account, resp, usage, terminalType, false)
 
 	contentType := "application/json; charset=utf-8"
 	if !ok {

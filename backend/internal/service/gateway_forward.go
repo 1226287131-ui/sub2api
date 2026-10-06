@@ -110,11 +110,19 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			return nil, err
 		}
 	}
+	groupID := int64(0)
+	if parsed.GroupID != nil {
+		groupID = *parsed.GroupID
+	}
+	ctx, cacheCreationAsInput := withChannelCacheCreationPolicy(ctx, c, s.channelService, groupID, account)
 	// Anthropic Fast is requested with speed=fast rather than OpenAI's
 	// service_tier. Attach it at this shared boundary so passthrough, OAuth and
 	// partial-stream results all use the same billing and usage-log path.
 	defer func() {
 		if result != nil {
+			if result.CacheCreationAsInput == nil {
+				result.CacheCreationAsInput = &cacheCreationAsInput
+			}
 			if tier := anthropicSpeedServiceTier(account, parsed.Speed, anthropicSpeedModel(parsed, result)); tier != nil {
 				result.ServiceTier = tier
 			}
